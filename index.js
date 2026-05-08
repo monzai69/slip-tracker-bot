@@ -519,6 +519,7 @@ app.post(
   function(req, res) {
     console.log("WEBHOOK HIT!", JSON.stringify(req.body));
     res.status(200).end();
+    if (!req.body.events) return;
     req.body.events.forEach(function(event) {
       handleEvent(event).catch(function(err) {
         console.error("Event error:", err.message);
