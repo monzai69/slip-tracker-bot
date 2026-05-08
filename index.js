@@ -55,56 +55,43 @@ function getPending(userId) {
 
 // ── Claude: read the slip image ────────────────────────────────────────────
 async function readSlip(imageBase64, caption) {
-  const resp = await axios.post(
-    "https://api.anthropic.com/v1/messages",
-    {
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 800,
-      messages: [{
-        role: "user",
-        content: [
-          {
-            type: "image",
-            source: { type: "base64", media_type: "image/jpeg", data: imageBase64 }
-          },
-          {
-            type: "text",
-            text: [
-              "You are a Thai bank slip reader.",
-              "Banks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay.",
-              "User note: \"" + (caption || "") + "\"",
-              "",
-              "Return ONLY a JSON object, no extra text:",
-              "{",
-              "  \"bank_from\": \"bank name\",",
-              "  \"account_from\": \"last 4 digits\",",
-              "  \"bank_to\": \"bank name\",",
-              "  \"account_to\": \"last 4 digits\",",
-              "  \"recipient_name\": \"name or null\",",
-              "  \"amount\": 0.00,",
-              "  \"transaction_date\": \"YYYY-MM-DD\",",
-              "  \"transaction_time\": \"HH:MM\",",
-              "  \"reference_number\": \"ref or null\",",
-              "  \"purpose\": \"use user note if given, else infer\",",
-              "  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"",
-              "}"
-            ].join("\n")
-          }
-        ]
-      }]
-    },
-    {
-      headers: {
-        "x-api-key": ANTHROPIC_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json"
+  try {
+    const resp = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 800,
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/jpeg", data: imageBase64 }
+            },
+            {
+              type: "text",
+              text: "You are a Thai bank slip reader. Banks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay. User note: \"" + (caption || "") + "\"\n\nReturn ONLY a JSON object, no extra text:\n{\n  \"bank_from\": \"bank name\",\n  \"account_from\": \"last 4 digits\",\n  \"bank_to\": \"bank name\",\n  \"account_to\": \"last 4 digits\",\n  \"recipient_name\": \"name or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD\",\n  \"transaction_time\": \"HH:MM\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else infer\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}"
+            }
+          ]
+        }]
+      },
+      {
+        headers: {
+          "x-api-key": ANTHROPIC_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json"
+        }
       }
-    }
-  );
-
-  const raw = resp.data.content[0].text.trim();
-  const clean = raw.replace(/```json/g, "").replace(/```/g, "").trim();
-  return JSON.parse(clean);
+    );
+    const raw = resp.data.content[0].text.trim();
+    console.log("Claude raw response:", raw);
+    const clean = raw.replace(/```json/g, "").replace(/```/g, "").trim();
+    return JSON.parse(clean);
+  } catch (e) {
+    console.error("Claude error:", e.message);
+    console.error("Claude details:", e.response ? JSON.stringify(e.response.data) : "no response data");
+    return null;
+  }
 }
 
 // ── Download image from LINE ───────────────────────────────────────────────
