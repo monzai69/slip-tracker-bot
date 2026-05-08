@@ -70,8 +70,7 @@ async function readSlip(imageBase64, caption) {
             },
             {
               type: "text",
-              text: "You are a Thai bank slip reader. Banks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay. User note: \"" + (caption || "") + "\"\n\nReturn ONLY a JSON object, no extra text:\n{\n  \"bank_from\": \"bank name\",\n  \"account_from\": \"last 4 digits\",\n  \"bank_to\": \"bank name\",\n  \"account_to\": \"last 4 digits\",\n  \"recipient_name\": \"name or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD\",\n  \"transaction_time\": \"HH:MM\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else infer\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}"
-            }
+text: "You are an expert Thai bank payment slip reader. Extract ALL details carefully.\n\nThai date formats to watch for:\n- DD/MM/YYYY or DD/MM/YY\n- DD MMM YYYY (e.g. 08 พ.ค. 2568 or 08 May 2026)\n- Buddhist year (พ.ศ.) — subtract 543 to get AD year. Example: 2568 = 2025, 2569 = 2026\n- Time is usually HH:MM or HH:MM:SS\n\nBanks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay.\n\nUser note: \"" + (caption || "") + "\"\n\nLook carefully at every part of the image for date and time. Return ONLY valid JSON:\n{\n  \"bank_from\": \"bank name or null\",\n  \"account_from\": \"last 4 digits or null\",\n  \"bank_to\": \"bank name or null\",\n  \"account_to\": \"last 4 digits or null\",\n  \"recipient_name\": \"name or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD or null\",\n  \"transaction_time\": \"HH:MM or null\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else infer from recipient name\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}"            }
           ]
         }]
       },
