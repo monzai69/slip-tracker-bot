@@ -487,6 +487,11 @@ app.get("/", function(req, res) {
   res.send("✅ Slip Tracker Bot is running!");
 });
 
+app.post("/test", express.json(), function(req, res) {
+  console.log("TEST HIT:", JSON.stringify(req.body));
+  res.send("ok");
+});
+
 app.use("/slips",     express.static(SLIPS_DIR));
 app.use("/bills",     express.static(BILLS_DIR));
 app.use("/dashboard", express.static(path.join(__dirname, "dashboard")));
