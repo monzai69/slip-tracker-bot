@@ -515,8 +515,9 @@ app.get("/api/report", async function(req, res) {
 // Webhook — must use raw body for LINE signature check
 app.post(
   "/webhook",
-  line.middleware(LINE_CONFIG),
+  express.json(),
   function(req, res) {
+    console.log("WEBHOOK HIT!", JSON.stringify(req.body));
     res.status(200).end();
     req.body.events.forEach(function(event) {
       handleEvent(event).catch(function(err) {
