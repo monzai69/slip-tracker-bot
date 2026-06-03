@@ -37,6 +37,7 @@ function savePayments(list) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(list, null, 2));
 }
 
+// ── Normal mode: waiting for single bill ──────────────────────────────────
 const pendingBill = {};
 
 function getPending(userId) {
@@ -46,6 +47,22 @@ function getPending(userId) {
   return s;
 }
 
+// ── Batch mode state per user ─────────────────────────────────────────────
+// batchState[userId] = {
+//   step: "slips" | "bills",
+//   slipIds: [1,2,3],   // payment IDs recorded so far
+//   expiresAt: timestamp
+// }
+const batchState = {};
+
+function getBatch(userId) {
+  const s = batchState[userId];
+  if (!s) return null;
+  if (Date.now() > s.expiresAt) { delete batchState[userId]; return null; }
+  return s;
+}
+
+// ── Claude: read slip ─────────────────────────────────────────────────────
 async function readSlip(imageBase64, caption) {
   try {
     const resp = await axios.post(
@@ -64,10 +81,38 @@ async function readSlip(imageBase64, caption) {
       { headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
     const raw = resp.data.content[0].text.trim();
-    console.log("Claude:", raw);
+    console.log("Claude slip:", raw);
     return JSON.parse(raw.replace(/```json/g,"").replace(/```/g,"").trim());
   } catch (e) {
     console.error("Claude error:", e.message, e.response ? JSON.stringify(e.response.data) : "");
+    return null;
+  }
+}
+
+// ── Claude: read bill amount only ─────────────────────────────────────────
+async function readBillAmount(imageBase64) {
+  try {
+    const resp = await axios.post(
+      "https://api.anthropic.com/v1/messages",
+      {
+        model: "claude-sonnet-4-5",
+        max_tokens: 100,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: imageBase64 } },
+            { type: "text", text: "Look at this bill or invoice image. Find the TOTAL amount to pay.\nReturn ONLY a JSON object, nothing else:\n{\"amount\": 0.00}\nAmount must be a number. No commas. If you cannot find an amount return {\"amount\": null}" }
+          ]
+        }]
+      },
+      { headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+    );
+    const raw = resp.data.content[0].text.trim();
+    console.log("Claude bill amount:", raw);
+    const parsed = JSON.parse(raw.replace(/```json/g,"").replace(/```/g,"").trim());
+    return parsed.amount || null;
+  } catch (e) {
+    console.error("Bill amount error:", e.message);
     return null;
   }
 }
@@ -123,7 +168,6 @@ async function makeReport(year, month) {
   const label = format(new Date(year, month - 1), "MMMM yyyy");
   const grandTotal = rows.reduce(function(s,p) { return s+(Number(p.amount)||0); }, 0);
 
-  // ── Sheet 1: All Transactions
   const s1 = wb.addWorksheet("All Transactions");
   s1.mergeCells("A1:M1");
   var t1 = s1.getCell("A1");
@@ -144,7 +188,6 @@ async function makeReport(year, month) {
   s1.columns=[{width:5},{width:12},{width:7},{width:14},{width:15},{width:11},{width:15},{width:11},{width:20},{width:28},{width:16},{width:15},{width:10}];
   s1.views=[{state:"frozen",ySplit:2}];
 
-  // ── Sheet 2: Summary (by account + by purpose)
   const s2 = wb.addWorksheet("Summary");
   s2.mergeCells("A1:D1");
   var t2=s2.getCell("A1"); t2.value="Summary — "+label;
@@ -173,7 +216,6 @@ async function makeReport(year, month) {
   });
   s2.columns=[{width:35},{width:14},{width:18},{width:12}];
 
-  // ── Per-Account Sheets (purpose summary + evidence)
   var accountGroups={};
   rows.forEach(function(p){
     var key=(p.bank_from||"Unknown")+"_"+(p.account_from||"????");
@@ -188,13 +230,9 @@ async function makeReport(year, month) {
     var color=getBankColor(grp.bank);
     var sheetName=(grp.bank+" ("+grp.acct+")").substring(0,31);
     var sa=wb.addWorksheet(sheetName);
-
-    // Title
     sa.mergeCells("A1:F1");
     var ta=sa.getCell("A1"); ta.value=grp.bank+" (****"+grp.acct+") — "+label;
     ta.font={size:13,bold:true,color:{argb:"FFFFFFFF"}}; ta.fill={type:"pattern",pattern:"solid",fgColor:{argb:color}}; ta.alignment={horizontal:"center"}; sa.getRow(1).height=28;
-
-    // Purpose summary
     sa.addRow([]);
     styleHdr(sa.addRow(["Purpose","Count","Total (฿)","% of Account"]),color);
     var apMap={};
@@ -207,8 +245,6 @@ async function makeReport(year, month) {
     });
     var atot=sa.addRow(["TOTAL",grp.payments.length,acctTotal,"100%"]);
     atot.getCell(3).numFmt="#,##0.00"; atot.eachCell(function(c){c.font={bold:true};c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFFFF9C4"}};});
-
-    // Evidence section
     sa.addRow([]); sa.addRow([]);
     sa.mergeCells("A"+(sa.rowCount)+":F"+(sa.rowCount));
     var evT=sa.getCell("A"+sa.rowCount); evT.value="📎 Payment Evidence";
@@ -216,7 +252,6 @@ async function makeReport(year, month) {
     sa.addRow([]);
     styleHdr(sa.addRow(["#","Date","Amount (฿)","Purpose","💳 Payment Slip","📄 Bill / Invoice"]),color);
     sa.columns=[{width:6},{width:12},{width:14},{width:30},{width:24},{width:24}];
-
     var ri=sa.rowCount+1;
     for(var pi=0;pi<grp.payments.length;pi++){
       var p=grp.payments[pi];
@@ -225,19 +260,16 @@ async function makeReport(year, month) {
       sa.getCell("B"+ri).value=p.transaction_date||"";
       sa.getCell("C"+ri).value=Number(p.amount)||0; sa.getCell("C"+ri).numFmt="#,##0.00"; sa.getCell("C"+ri).font={bold:true,color:{argb:"FF1565C0"}};
       sa.getCell("D"+ri).value=p.purpose||""; sa.getCell("D"+ri).alignment={wrapText:true,vertical:"middle"};
-
       var sp=p.imageFile?path.join(SLIPS_DIR,p.imageFile):null;
       if(sp&&fs.existsSync(sp)){
         try{ sa.addImage(wb.addImage({filename:sp,extension:"jpeg"}),{tl:{col:4,row:ri-1},br:{col:5,row:ri},editAs:"oneCell"}); }
         catch(e){sa.getCell("E"+ri).value="Image error";}
       } else { sa.getCell("E"+ri).value="No slip image"; sa.getCell("E"+ri).font={italic:true,color:{argb:"FF9E9E9E"}}; }
-
       var bp=p.billFile?path.join(BILLS_DIR,p.billFile):null;
       if(bp&&fs.existsSync(bp)){
         try{ sa.addImage(wb.addImage({filename:bp,extension:"jpeg"}),{tl:{col:5,row:ri-1},br:{col:6,row:ri},editAs:"oneCell"}); }
         catch(e){sa.getCell("F"+ri).value="Image error";}
       } else { sa.getCell("F"+ri).value="⚠️ No bill"; sa.getCell("F"+ri).font={italic:true,color:{argb:"FFBF360C"}}; }
-
       ["A","B","C","D","E","F"].forEach(function(col){
         sa.getCell(col+ri).border={bottom:{style:"thin",color:{argb:"FFE0E0E0"}}};
         if(!sa.getCell(col+ri).alignment) sa.getCell(col+ri).alignment={vertical:"middle"};
@@ -256,88 +288,299 @@ const client = new line.Client(LINE_CONFIG);
 
 async function handleEvent(event) {
   if (event.type !== "message") return;
-  var uid=event.source.userId;
-  var gid=event.source.groupId||event.source.roomId||uid;
-  var pending=getPending(uid);
+  var uid = event.source.userId;
+  var gid = event.source.groupId || event.source.roomId || uid;
+  var pending = getPending(uid);
+  var batch = getBatch(uid);
 
-  if (event.message.type === "image") {
-    if (pending) {
-      var buf=await getImage(client,event.message.id);
-      var fname="bill_"+Date.now()+".jpg";
-      fs.writeFileSync(path.join(BILLS_DIR,fname),buf);
-      var list=loadPayments(); var idx=list.findIndex(function(p){return p.id===pending.paymentId;});
-      if(idx!==-1){list[idx].billFile=fname;savePayments(list);}
-      delete pendingBill[uid];
-      return client.replyMessage(event.replyToken,{type:"text",text:"📎 Bill saved for #"+pending.paymentId+"\n✅ Done! Both images will appear in the report."});
+  // ════════════════════════════════════════════════
+  // BATCH MODE — image handling
+  // ════════════════════════════════════════════════
+  if (batch && event.message.type === "image") {
+
+    // ── BATCH: collecting slips ──
+    if (batch.step === "slips") {
+      // silently save slip, process in background
+      client.replyMessage(event.replyToken, { type: "text", text: "🔍 Reading slip " + (batch.slipIds.length + 1) + "..." });
+      try {
+        var buf = await getImage(client, event.message.id);
+        var data = await readSlip(buf.toString("base64"), "");
+        if (!data) {
+          client.pushMessage(gid, { type: "text", text: "⚠️ Could not read slip " + (batch.slipIds.length + 1) + " — skipped." });
+          return;
+        }
+        var fname = "slip_" + Date.now() + ".jpg";
+        fs.writeFileSync(path.join(SLIPS_DIR, fname), buf);
+        var list = loadPayments();
+        var newId = list.length + 1;
+        list.push(Object.assign({ id: newId, imageFile: fname, billFile: null, savedAt: new Date().toISOString() }, data));
+        savePayments(list);
+        batch.slipIds.push(newId);
+        batchState[uid].expiresAt = Date.now() + 30 * 60 * 1000; // extend 30min
+        var amt = data.amount ? "฿" + Number(data.amount).toLocaleString("th-TH", { minimumFractionDigits: 2 }) : "?";
+        client.pushMessage(gid, { type: "text", text: "✅ Slip #" + newId + " — " + amt + " → " + (data.recipient_name || data.bank_to || "?") + "\n\nSend more slips or type /done" });
+      } catch(err) {
+        console.error("Batch slip error:", err.message);
+        client.pushMessage(gid, { type: "text", text: "⚠️ Error reading slip — please try again." });
+      }
+      return;
     }
-    await client.replyMessage(event.replyToken,{type:"text",text:"🔍 Reading your slip..."});
-    try {
-      var buf=await getImage(client,event.message.id);
-      var data=await readSlip(buf.toString("base64"),"");
-      if(!data) return client.pushMessage(gid,{type:"text",text:"❌ Could not read slip. Please send a clearer image."});
-      var fname="slip_"+Date.now()+".jpg";
-      fs.writeFileSync(path.join(SLIPS_DIR,fname),buf);
-      var list=loadPayments(); var newId=list.length+1;
-      list.push(Object.assign({id:newId,imageFile:fname,billFile:null,savedAt:new Date().toISOString()},data));
-      savePayments(list);
-      pendingBill[uid]={paymentId:newId,expiresAt:Date.now()+5*60*1000};
-      return client.pushMessage(gid,{type:"text",text:slipReply(data,newId)});
-    } catch(err) {
-      console.error("Slip error:",err.message);
-      return client.pushMessage(gid,{type:"text",text:"❌ Could not read slip. Please try again."});
+
+    // ── BATCH: collecting bills ──
+    if (batch.step === "bills") {
+      client.replyMessage(event.replyToken, { type: "text", text: "🔍 Reading bill amount..." });
+      try {
+        var buf = await getImage(client, event.message.id);
+        var billAmount = await readBillAmount(buf.toString("base64"));
+
+        if (!billAmount) {
+          client.pushMessage(gid, { type: "text", text: "⚠️ Could not read amount from this bill — skipped." });
+          return;
+        }
+
+        // Find unmatched slip with same amount
+        var list = loadPayments();
+        var TOLERANCE = 1; // within ฿1 tolerance for rounding
+        var matchIdx = -1;
+        for (var i = 0; i < batch.slipIds.length; i++) {
+          var slipId = batch.slipIds[i];
+          var slipIdx = list.findIndex(function(p) { return p.id === slipId; });
+          if (slipIdx === -1) continue;
+          if (list[slipIdx].billFile) continue; // already matched
+          var diff = Math.abs((Number(list[slipIdx].amount) || 0) - Number(billAmount));
+          if (diff <= TOLERANCE) { matchIdx = slipIdx; break; }
+        }
+
+        if (matchIdx === -1) {
+          var billAmt = "฿" + Number(billAmount).toLocaleString("th-TH", { minimumFractionDigits: 2 });
+          client.pushMessage(gid, { type: "text", text: "⚠️ Bill " + billAmt + " — no matching slip found, skipped.\n\nSend more bills or type /done" });
+          return;
+        }
+
+        // Save bill and match
+        var billFname = "bill_" + Date.now() + ".jpg";
+        fs.writeFileSync(path.join(BILLS_DIR, billFname), buf);
+        var matchedId = list[matchIdx].id;
+        var matchedAmt = "฿" + Number(list[matchIdx].amount).toLocaleString("th-TH", { minimumFractionDigits: 2 });
+        list[matchIdx].billFile = billFname;
+        savePayments(list);
+        batchState[uid].expiresAt = Date.now() + 30 * 60 * 1000;
+
+        client.pushMessage(gid, { type: "text", text: "✅ Bill matched → #" + matchedId + " " + matchedAmt + "\n\nSend more bills or type /done" });
+      } catch(err) {
+        console.error("Batch bill error:", err.message);
+        client.pushMessage(gid, { type: "text", text: "⚠️ Error reading bill — please try again." });
+      }
+      return;
     }
   }
 
-  if (event.message.type === "text") {
-    var txt=event.message.text.trim();
+  // ════════════════════════════════════════════════
+  // NORMAL MODE — image handling (unchanged)
+  // ════════════════════════════════════════════════
+  if (!batch && event.message.type === "image") {
     if (pending) {
-      if(txt==="/skip"){delete pendingBill[uid];return client.replyMessage(event.replyToken,{type:"text",text:"⏭️ Skipped. You can add the bill later."});}
-      var list=loadPayments(); var idx=list.findIndex(function(p){return p.id===pending.paymentId;});
-      if(idx!==-1){list[idx].purpose=txt;savePayments(list);}
+      var buf = await getImage(client, event.message.id);
+      var fname = "bill_" + Date.now() + ".jpg";
+      fs.writeFileSync(path.join(BILLS_DIR, fname), buf);
+      var list = loadPayments();
+      var idx = list.findIndex(function(p) { return p.id === pending.paymentId; });
+      if (idx !== -1) { list[idx].billFile = fname; savePayments(list); }
       delete pendingBill[uid];
-      return client.replyMessage(event.replyToken,{type:"text",text:"✅ Purpose saved: "+txt+"\n\nSend bill photo now, or /skip."});
+      return client.replyMessage(event.replyToken, { type: "text", text: "📎 Bill saved for #" + pending.paymentId + "\n✅ Done! Both images will appear in the report." });
     }
-    var tl=txt.toLowerCase();
+    await client.replyMessage(event.replyToken, { type: "text", text: "🔍 Reading your slip..." });
+    try {
+      var buf = await getImage(client, event.message.id);
+      var data = await readSlip(buf.toString("base64"), "");
+      if (!data) return client.pushMessage(gid, { type: "text", text: "❌ Could not read slip. Please send a clearer image." });
+      var fname = "slip_" + Date.now() + ".jpg";
+      fs.writeFileSync(path.join(SLIPS_DIR, fname), buf);
+      var list = loadPayments();
+      var newId = list.length + 1;
+      list.push(Object.assign({ id: newId, imageFile: fname, billFile: null, savedAt: new Date().toISOString() }, data));
+      savePayments(list);
+      pendingBill[uid] = { paymentId: newId, expiresAt: Date.now() + 5 * 60 * 1000 };
+      return client.pushMessage(gid, { type: "text", text: slipReply(data, newId) });
+    } catch(err) {
+      console.error("Slip error:", err.message);
+      return client.pushMessage(gid, { type: "text", text: "❌ Could not read slip. Please try again." });
+    }
+  }
 
-    if(tl==="/help"||tl==="help"){
-      return client.replyMessage(event.replyToken,{type:"text",text:["💳 Slip Tracker Bot","━━━━━━━━━━━━━━━━━━","📸 Send slip photo → bot reads it","📸 Send bill photo → saved as evidence","💬 Type note after slip → sets purpose","/skip → skip bill upload","","/summary  — this month totals","/list     — last 5 payments","/report   — Excel for this month","/report YYYY MM — specific month","/help     — this menu"].join("\n")});
+  // ════════════════════════════════════════════════
+  // TEXT commands
+  // ════════════════════════════════════════════════
+  if (event.message.type === "text") {
+    var txt = event.message.text.trim();
+    var tl = txt.toLowerCase();
+
+    // ── /done in batch mode ──
+    if (tl === "/done" && batch) {
+      if (batch.step === "slips") {
+        if (batch.slipIds.length === 0) {
+          delete batchState[uid];
+          return client.replyMessage(event.replyToken, { type: "text", text: "❌ No slips recorded. Batch cancelled." });
+        }
+        // Switch to bill collection step
+        batchState[uid].step = "bills";
+        batchState[uid].expiresAt = Date.now() + 30 * 60 * 1000;
+        var list = loadPayments();
+        var slipLines = batch.slipIds.map(function(id) {
+          var p = list.find(function(x) { return x.id === id; });
+          if (!p) return "#" + id + " ?";
+          return "#" + id + "  ฿" + Number(p.amount||0).toLocaleString("th-TH") + "  " + (p.recipient_name || p.bank_to || "?");
+        });
+        return client.replyMessage(event.replyToken, {
+          type: "text",
+          text: [
+            "✅ " + batch.slipIds.length + " slips recorded:",
+            slipLines.join("\n"),
+            "",
+            "📎 Now send all BILL / INVOICE photos",
+            "Bot will auto-match by amount",
+            "Type /done when finished"
+          ].join("\n")
+        });
+      }
+
+      if (batch.step === "bills") {
+        // Final report
+        var list = loadPayments();
+        var matched = batch.slipIds.filter(function(id) {
+          var p = list.find(function(x) { return x.id === id; });
+          return p && p.billFile;
+        });
+        var unmatched = batch.slipIds.filter(function(id) {
+          var p = list.find(function(x) { return x.id === id; });
+          return p && !p.billFile;
+        });
+        var unmatchedLines = unmatched.map(function(id) {
+          var p = list.find(function(x) { return x.id === id; });
+          return "  ⚠️ #" + id + " ฿" + Number(p ? p.amount : 0).toLocaleString("th-TH") + " — " + (p ? (p.recipient_name || p.bank_to || "?") : "?");
+        });
+        delete batchState[uid];
+        return client.replyMessage(event.replyToken, {
+          type: "text",
+          text: [
+            "🎉 Batch complete!",
+            "━━━━━━━━━━━━━━━━━━",
+            "✅ Matched: " + matched.length + "/" + batch.slipIds.length,
+            unmatched.length > 0 ? "⚠️ No bill (" + unmatched.length + "):\n" + unmatchedLines.join("\n") : "✅ All slips have evidence!",
+            "",
+            "Type /report to generate Excel 📊"
+          ].join("\n")
+        });
+      }
     }
 
-    if(tl==="/summary"||tl==="summary"){
-      var list=loadPayments(); var now=new Date();
-      var thisMonth=list.filter(function(p){if(!p.transaction_date)return false;var d=parseISO(p.transaction_date);return d.getFullYear()===now.getFullYear()&&d.getMonth()===now.getMonth();});
-      var total=thisMonth.reduce(function(s,p){return s+(Number(p.amount)||0);},0);
-      var withBill=thisMonth.filter(function(p){return p.billFile;}).length;
-      var aMap={}; thisMonth.forEach(function(p){var k=(p.bank_from||"Unknown")+" ****"+(p.account_from||"????");aMap[k]=(aMap[k]||0)+(Number(p.amount)||0);});
-      var aLines=Object.entries(aMap).map(function(e){return"  • "+e[0]+": ฿"+e[1].toLocaleString("th-TH",{minimumFractionDigits:2});}).join("\n");
-      return client.replyMessage(event.replyToken,{type:"text",text:["📊 "+format(now,"MMMM yyyy")+" Summary","━━━━━━━━━━━━━━━━━━","📋 Transactions: "+thisMonth.length,"💰 Total: ฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2}),"📎 With bill: "+withBill+"/"+thisMonth.length,"","By Account:",aLines||"  (none yet)","","Type /report to get Excel"].join("\n")});
+    // ── /cancel batch ──
+    if (tl === "/cancel" && batch) {
+      delete batchState[uid];
+      return client.replyMessage(event.replyToken, { type: "text", text: "❌ Batch cancelled." });
     }
 
-    if(tl==="/list"||tl==="list"){
-      var list=loadPayments();
-      if(!list.length)return client.replyMessage(event.replyToken,{type:"text",text:"No payments recorded yet."});
-      var recent=list.slice(-5).reverse();
-      var lines=recent.map(function(p){return["#"+p.id+"  "+(p.transaction_date||"?")+"  ฿"+Number(p.amount||0).toLocaleString("th-TH"),"  "+(p.bank_from||"?")+" ****"+(p.account_from||"????"),"  "+(p.purpose||"-")+"  "+(p.billFile?"📎✅":"⚠️")].join("\n");});
-      return client.replyMessage(event.replyToken,{type:"text",text:"📋 Last 5:\n\n"+lines.join("\n\n")});
+    // ── Normal mode: pending bill text note ──
+    if (pending && !batch) {
+      if (tl === "/skip") {
+        delete pendingBill[uid];
+        return client.replyMessage(event.replyToken, { type: "text", text: "⏭️ Skipped. You can add the bill later." });
+      }
+      var list = loadPayments();
+      var idx = list.findIndex(function(p) { return p.id === pending.paymentId; });
+      if (idx !== -1) { list[idx].purpose = txt; savePayments(list); }
+      delete pendingBill[uid];
+      return client.replyMessage(event.replyToken, { type: "text", text: "✅ Purpose saved: " + txt + "\n\nSend bill photo now, or /skip." });
     }
 
-    if(tl.startsWith("/report")||tl==="report"){
-      var parts=txt.split(" "); var now=new Date();
-      var year=parseInt(parts[1])||now.getFullYear();
-      var month=parseInt(parts[2])||now.getMonth()+1;
-      await client.replyMessage(event.replyToken,{type:"text",text:"📊 Generating report..."});
+    // ── /batch — start batch mode ──
+    if (tl === "/batch") {
+      if (batch) {
+        return client.replyMessage(event.replyToken, { type: "text", text: "⚠️ Already in batch mode!\nSend slips or type /done or /cancel." });
+      }
+      batchState[uid] = { step: "slips", slipIds: [], expiresAt: Date.now() + 30 * 60 * 1000 };
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: [
+          "📦 Batch Mode ON",
+          "━━━━━━━━━━━━━━━━━━",
+          "📸 Send all your SLIP photos now",
+          "Type /done when all slips sent",
+          "Type /cancel to exit batch mode",
+          "",
+          "⏱ Session expires in 30 minutes"
+        ].join("\n")
+      });
+    }
+
+    // ── /help ──
+    if (tl === "/help" || tl === "help") {
+      return client.replyMessage(event.replyToken, {
+        type: "text",
+        text: [
+          "💳 Slip Tracker Bot",
+          "━━━━━━━━━━━━━━━━━━",
+          "NORMAL MODE (one by one):",
+          "📸 Send slip → bot reads it",
+          "📸 Send bill → saved as evidence",
+          "💬 Type note → sets purpose",
+          "/skip → skip bill",
+          "",
+          "BATCH MODE (many at once):",
+          "/batch → start batch mode",
+          "📸📸📸 Send all slips",
+          "/done → switch to bill upload",
+          "📸📸📸 Send all bills (any order)",
+          "/done → finish & see summary",
+          "/cancel → exit batch mode",
+          "",
+          "/summary  — this month totals",
+          "/list     — last 5 payments",
+          "/report   — Excel for this month",
+          "/report YYYY MM — specific month",
+          "/help     — this menu"
+        ].join("\n")
+      });
+    }
+
+    // ── /summary ──
+    if (tl === "/summary" || tl === "summary") {
+      var list = loadPayments(); var now = new Date();
+      var thisMonth = list.filter(function(p) { if (!p.transaction_date) return false; var d = parseISO(p.transaction_date); return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth(); });
+      var total = thisMonth.reduce(function(s,p) { return s+(Number(p.amount)||0); }, 0);
+      var withBill = thisMonth.filter(function(p) { return p.billFile; }).length;
+      var aMap = {}; thisMonth.forEach(function(p) { var k=(p.bank_from||"Unknown")+" ****"+(p.account_from||"????"); aMap[k]=(aMap[k]||0)+(Number(p.amount)||0); });
+      var aLines = Object.entries(aMap).map(function(e) { return "  • "+e[0]+": ฿"+e[1].toLocaleString("th-TH",{minimumFractionDigits:2}); }).join("\n");
+      return client.replyMessage(event.replyToken, { type: "text", text: ["📊 "+format(now,"MMMM yyyy")+" Summary","━━━━━━━━━━━━━━━━━━","📋 Transactions: "+thisMonth.length,"💰 Total: ฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2}),"📎 With bill: "+withBill+"/"+thisMonth.length,"","By Account:",aLines||"  (none yet)","","Type /report to get Excel"].join("\n") });
+    }
+
+    // ── /list ──
+    if (tl === "/list" || tl === "list") {
+      var list = loadPayments();
+      if (!list.length) return client.replyMessage(event.replyToken, { type: "text", text: "No payments recorded yet." });
+      var recent = list.slice(-5).reverse();
+      var lines = recent.map(function(p) { return ["#"+p.id+"  "+(p.transaction_date||"?")+"  ฿"+Number(p.amount||0).toLocaleString("th-TH"),"  "+(p.bank_from||"?")+" ****"+(p.account_from||"????"),"  "+(p.purpose||"-")+"  "+(p.billFile?"📎✅":"⚠️")].join("\n"); });
+      return client.replyMessage(event.replyToken, { type: "text", text: "📋 Last 5:\n\n" + lines.join("\n\n") });
+    }
+
+    // ── /report ──
+    if (tl.startsWith("/report") || tl === "report") {
+      var parts = txt.split(" "); var now = new Date();
+      var year = parseInt(parts[1]) || now.getFullYear();
+      var month = parseInt(parts[2]) || now.getMonth() + 1;
+      await client.replyMessage(event.replyToken, { type: "text", text: "📊 Generating report..." });
       try {
-        await makeReport(year,month);
-        var list=loadPayments();
-        var filtered=list.filter(function(p){if(!p.transaction_date)return false;var d=parseISO(p.transaction_date);return d.getFullYear()===year&&d.getMonth()+1===month;});
-        var total=filtered.reduce(function(s,p){return s+(Number(p.amount)||0);},0);
-        var withBill=filtered.filter(function(p){return p.billFile;}).length;
-        var accts={}; filtered.forEach(function(p){accts[(p.bank_from||"?")+" ****"+(p.account_from||"????")] = true;});
-        var baseUrl=process.env.DASHBOARD_URL||"https://slip-tracker-bot.onrender.com";
-        return client.pushMessage(gid,{type:"text",text:["✅ Report ready — "+format(new Date(year,month-1),"MMMM yyyy"),"📋 "+filtered.length+" transactions","💰 ฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2}),"🏦 "+Object.keys(accts).length+" account sheet(s)","📎 Bill evidence: "+withBill+"/"+filtered.length,"","⬇️ Download Excel:",baseUrl+"/api/report?year="+year+"&month="+month].join("\n")});
+        await makeReport(year, month);
+        var list = loadPayments();
+        var filtered = list.filter(function(p) { if (!p.transaction_date) return false; var d = parseISO(p.transaction_date); return d.getFullYear() === year && d.getMonth()+1 === month; });
+        var total = filtered.reduce(function(s,p) { return s+(Number(p.amount)||0); }, 0);
+        var withBill = filtered.filter(function(p) { return p.billFile; }).length;
+        var accts = {}; filtered.forEach(function(p) { accts[(p.bank_from||"?")+" ****"+(p.account_from||"????")] = true; });
+        var baseUrl = process.env.DASHBOARD_URL || "https://slip-tracker-bot-production.up.railway.app";
+        return client.pushMessage(gid, { type: "text", text: ["✅ Report ready — "+format(new Date(year,month-1),"MMMM yyyy"),"📋 "+filtered.length+" transactions","💰 ฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2}),"🏦 "+Object.keys(accts).length+" account sheet(s)","📎 Bill evidence: "+withBill+"/"+filtered.length,"","⬇️ Download Excel:",baseUrl+"/api/report?year="+year+"&month="+month].join("\n") });
       } catch(err) {
-        console.error("Report error:",err.message);
-        return client.pushMessage(gid,{type:"text",text:"❌ Report error: "+err.message});
+        console.error("Report error:", err.message);
+        return client.pushMessage(gid, { type: "text", text: "❌ Report error: " + err.message });
       }
     }
   }
@@ -349,15 +592,15 @@ app.use("/bills", express.static(BILLS_DIR));
 app.use("/dashboard", express.static(path.join(__dirname, "dashboard")));
 app.get("/api/payments", function(req, res) { res.json(loadPayments()); });
 app.get("/api/report", async function(req, res) {
-  var now=new Date(); var year=parseInt(req.query.year)||now.getFullYear(); var month=parseInt(req.query.month)||now.getMonth()+1;
-  try { var file=await makeReport(year,month); res.download(file,"Payment_Report_"+year+"_"+String(month).padStart(2,"0")+".xlsx"); }
-  catch(err) { res.status(500).send("Error: "+err.message); }
+  var now = new Date(); var year = parseInt(req.query.year) || now.getFullYear(); var month = parseInt(req.query.month) || now.getMonth() + 1;
+  try { var file = await makeReport(year, month); res.download(file, "Payment_Report_"+year+"_"+String(month).padStart(2,"0")+".xlsx"); }
+  catch(err) { res.status(500).send("Error: " + err.message); }
 });
 
 app.post("/webhook", express.json(), function(req, res) {
   console.log("WEBHOOK HIT!");
   res.status(200).end();
-  if(!req.body||!req.body.events) return;
+  if (!req.body || !req.body.events) return;
   req.body.events.forEach(function(event) {
     handleEvent(event).catch(function(err) { console.error("Event error:", err.message); });
   });
