@@ -228,7 +228,7 @@ async function makeReport(year, month) {
     var grp=accountGroups[accountKeys[ai]];
     var acctTotal=grp.payments.reduce(function(s,p){return s+(Number(p.amount)||0);},0);
     var color=getBankColor(grp.bank);
-    var sheetName=(grp.bank+" ("+grp.acct+")").substring(0,31);
+    var sheetName=(grp.bank+" ("+grp.acct+")").replace(/[*?:\\/\[\]]/g,"-").substring(0,31);    
     var sa=wb.addWorksheet(sheetName);
     sa.mergeCells("A1:F1");
     var ta=sa.getCell("A1"); ta.value=grp.bank+" (****"+grp.acct+") — "+label;
