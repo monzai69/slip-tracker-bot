@@ -250,26 +250,31 @@ async function makeReport(year, month) {
     var evT=sa.getCell("A"+sa.rowCount); evT.value="📎 Payment Evidence";
     evT.font={bold:true,size:12,color:{argb:"FFFFFFFF"}}; evT.fill={type:"pattern",pattern:"solid",fgColor:{argb:color}}; evT.alignment={horizontal:"center"}; sa.getRow(sa.rowCount).height=24;
     sa.addRow([]);
-    styleHdr(sa.addRow(["#","Date","Amount (฿)","Purpose","💳 Payment Slip","📄 Bill / Invoice"]),color);
-    sa.columns=[{width:6},{width:12},{width:14},{width:30},{width:24},{width:24}];
+ styleHdr(sa.addRow(["#","Date","Amount (฿)","Purpose","💳 Payment Slip","📄 Bill / Invoice"]),color);
+    sa.columns=[{width:6},{width:12},{width:14},{width:30},{width:28},{width:28}];
+    var baseUrl=process.env.DASHBOARD_URL||"https://slip-tracker-bot-production.up.railway.app";
     var ri=sa.rowCount+1;
     for(var pi=0;pi<grp.payments.length;pi++){
       var p=grp.payments[pi];
-      sa.getRow(ri).height=90;
+      sa.getRow(ri).height=22;
       sa.getCell("A"+ri).value="#"+p.id;
       sa.getCell("B"+ri).value=p.transaction_date||"";
       sa.getCell("C"+ri).value=Number(p.amount)||0; sa.getCell("C"+ri).numFmt="#,##0.00"; sa.getCell("C"+ri).font={bold:true,color:{argb:"FF1565C0"}};
       sa.getCell("D"+ri).value=p.purpose||""; sa.getCell("D"+ri).alignment={wrapText:true,vertical:"middle"};
-      var sp=p.imageFile?path.join(SLIPS_DIR,p.imageFile):null;
-      if(sp&&fs.existsSync(sp)){
-        try{ sa.addImage(wb.addImage({filename:sp,extension:"jpeg"}),{tl:{col:4,row:ri-1},br:{col:5,row:ri},editAs:"oneCell"}); }
-        catch(e){sa.getCell("E"+ri).value="Image error";}
-      } else { sa.getCell("E"+ri).value="No slip image"; sa.getCell("E"+ri).font={italic:true,color:{argb:"FF9E9E9E"}}; }
-      var bp=p.billFile?path.join(BILLS_DIR,p.billFile):null;
-      if(bp&&fs.existsSync(bp)){
-        try{ sa.addImage(wb.addImage({filename:bp,extension:"jpeg"}),{tl:{col:5,row:ri-1},br:{col:6,row:ri},editAs:"oneCell"}); }
-        catch(e){sa.getCell("F"+ri).value="Image error";}
-      } else { sa.getCell("F"+ri).value="⚠️ No bill"; sa.getCell("F"+ri).font={italic:true,color:{argb:"FFBF360C"}}; }
+      if(p.imageFile){
+        sa.getCell("E"+ri).value={text:"🔗 View Slip",hyperlink:baseUrl+"/slips/"+p.imageFile};
+        sa.getCell("E"+ri).font={color:{argb:"FF1565C0"},underline:true,bold:true};
+      } else {
+        sa.getCell("E"+ri).value="No slip image";
+        sa.getCell("E"+ri).font={italic:true,color:{argb:"FF9E9E9E"}};
+      }
+      if(p.billFile){
+        sa.getCell("F"+ri).value={text:"🔗 View Bill",hyperlink:baseUrl+"/bills/"+p.billFile};
+        sa.getCell("F"+ri).font={color:{argb:"FF2E7D32"},underline:true,bold:true};
+      } else {
+        sa.getCell("F"+ri).value="⚠️ No bill";
+        sa.getCell("F"+ri).font={italic:true,color:{argb:"FFBF360C"}};
+      }
       ["A","B","C","D","E","F"].forEach(function(col){
         sa.getCell(col+ri).border={bottom:{style:"thin",color:{argb:"FFE0E0E0"}}};
         if(!sa.getCell(col+ri).alignment) sa.getCell(col+ri).alignment={vertical:"middle"};
