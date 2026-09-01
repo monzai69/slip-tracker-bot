@@ -266,7 +266,7 @@ async function makeReport(year, month) {
   // ── Per-Account Sheets ──
   var accountGroups={};
   rows.forEach(function(p){
-    var key=(p.bank_from||"Unknown")+"_"+(p.account_from||"????");
+    var key=(p.bank_from||"Unknown").replace(/kasikorn|kbank/gi,"KBank")+"_"+(p.account_from||"????");
     if(!accountGroups[key])accountGroups[key]={bank:p.bank_from||"Unknown",acct:p.account_from||"????",payments:[]};
     accountGroups[key].payments.push(p);
   });
