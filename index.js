@@ -77,8 +77,7 @@ async function detectImageType(imageBase64) {
           role: "user",
           content: [
             { type: "image", source: { type: "base64", media_type: "image/jpeg", data: imageBase64 } },
-            { type: "text", text: "Look at this image. Is it:\n1. A bank transfer payment slip (shows transfer confirmation, amount sent, from/to accounts) from Thai banks like SCB, KBank, GSB, Krungthai, Bangkok Bank, Krungsri, TMB, PromptPay\n2. A bill, invoice, or receipt (shows what was purchased or owed)\n3. Something else / unclear\n\nReturn ONLY one word: SLIP, BILL, or UNKNOWN" }
-          ]
+{ type: "text", text: "Look at this image carefully and decide if it is a bank transfer confirmation slip or a bill/invoice.\n\nIt is a SLIP if it shows ANY of these:\n- 'Transfer Completed' or 'Transfer Successful'\n- 'โอนเงินสำเร็จ' or 'รายการสำเร็จ'\n- 'Transaction No' or 'Reference No' or 'เลขที่รายการ'\n- Sender account AND receiver account with bank names\n- FROM and TO with account numbers\n- Banks: SCB, KBank, KBIZ, GSB, Krungthai, Bangkok Bank, Krungsri, TMB, TTB, PromptPay\n\nIt is a BILL if it shows ANY of these:\n- QR code for payment (even if it shows an amount or bank account number)\n- Invoice or receipt with list of products/services\n- 'Please pay' or 'Amount due' or 'ยอดที่ต้องชำระ'\n- Bill with company name and itemized costs\n- Bank account number for receiving payment (but NO transfer confirmation)\n\nKEY RULE: A QR code or bank account number shown on a bill is NOT a slip. A slip must show transfer confirmation that money has already been sent.\n\nReturn ONLY one word: SLIP, BILL, or UNKNOWN" }          ]
         }]
       },
       { headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
