@@ -31,6 +31,12 @@ const INBOX_FILE = path.join(DATA_DIR, "inbox.json");
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 });
 
+// One-time safety backup before multi-bill migration
+var BACKUP_FILE = path.join(DATA_DIR, "payments_backup_v4.json");
+try {
+  if (fs.existsSync(DATA_FILE) && !fs.existsSync(BACKUP_FILE)) fs.copyFileSync(DATA_FILE, BACKUP_FILE);
+} catch (e) { console.error("Backup error:", e.message); }
+
 // ── Storage ────────────────────────────────────────────────────────────────
 function loadPayments() {
   try {
@@ -73,6 +79,41 @@ function nextNumericId() {
   return max + 1;
 }
 function showId(p) { return p.display_id ? p.display_id : String(p.id); }
+
+// ── Multi-bill support: billFiles[] is the new store; billFile kept for compatibility ──
+function getBillFiles(p) {
+  if (Array.isArray(p.billFiles)) return p.billFiles;
+  return p.billFile ? [p.billFile] : [];
+}
+function setBillFiles(p, arr) {
+  p.billFiles = arr;
+  p.billFile = arr.length ? arr[0] : null;
+}
+function moveToInboxAsItem(file, type, billAmount, source) {
+  var inbox = loadInbox();
+  var item = { id: "ib" + Date.now() + Math.floor(Math.random()*1000), file: file, type: type || "bill", billAmount: (billAmount === 0 || billAmount) ? billAmount : null, uploadedAt: new Date().toISOString(), source: source || "web" };
+  inbox.push(item);
+  saveInbox(inbox);
+  return item;
+}
+async function readInboxAmountsInBackground(ids) {
+  for (var i = 0; i < ids.length; i++) {
+    try {
+      var inbox = loadInbox();
+      var idx = inbox.findIndex(function(x) { return x.id === ids[i]; });
+      if (idx === -1) continue;
+      if (inbox[idx].billAmount !== null && inbox[idx].billAmount !== undefined) continue;
+      var fp = path.join(BILLS_DIR, inbox[idx].file);
+      if (!fs.existsSync(fp)) continue;
+      var amt = await readBillAmount(fs.readFileSync(fp).toString("base64"));
+      inbox = loadInbox();
+      idx = inbox.findIndex(function(x) { return x.id === ids[i]; });
+      if (idx === -1) continue;
+      inbox[idx].billAmount = (amt === 0 || amt) ? amt : null;
+      saveInbox(inbox);
+    } catch (e) { console.error("bg amount error:", e.message); }
+  }
+}
 
 // ── Last slip per user (for purpose note in LINE) ─────────────────────────
 const lastSlip = {};
@@ -265,7 +306,7 @@ async function makeReport(year, month) {
   s1.getRow(1).height = 30;
   styleHdr(s1.addRow(["#","Date","Time","Amount (฿)","From Bank","Acct","To Bank","Acct","Recipient","Purpose","Ref","Type","Evidence"]), "FF0D47A1");
   rows.forEach(function(p, i) {
-    var row = s1.addRow([showId(p),p.transaction_date||"",p.transaction_time||"",Number(p.amount)||0,p.bank_from||"",p.account_from||"",p.bank_to||"",p.account_to||"",p.recipient_name||"",p.purpose||"",p.reference_number||"",(p.slip_type||"").replace(/_/g," "),p.billFile?"✅":"⚠️"]);
+    var row = s1.addRow([showId(p),p.transaction_date||"",p.transaction_time||"",Number(p.amount)||0,p.bank_from||"",p.account_from||"",p.bank_to||"",p.account_to||"",p.recipient_name||"",p.purpose||"",p.reference_number||"",(p.slip_type||"").replace(/_/g," "),(getBillFiles(p).length?("✅ "+getBillFiles(p).length):"⚠️")]);
     if (i%2===0) row.eachCell(function(c){c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFF3F8FF"}};});
     row.getCell(4).numFmt="#,##0.00"; row.getCell(4).font={bold:true,color:{argb:"FF1565C0"}}; row.height=20;
   });
@@ -337,35 +378,45 @@ async function makeReport(year, month) {
     var evT=sa.getCell("A"+sa.rowCount); evT.value="📎 Payment Evidence";
     evT.font={bold:true,size:12,color:{argb:"FFFFFFFF"}}; evT.fill={type:"pattern",pattern:"solid",fgColor:{argb:color}}; evT.alignment={horizontal:"center"}; sa.getRow(sa.rowCount).height=24;
     sa.addRow([]);
-    styleHdr(sa.addRow(["#","Date","Amount (฿)","Purpose","💳 Payment Slip","📄 Bill / Invoice"]),color);
-    sa.columns=[{width:9},{width:12},{width:14},{width:30},{width:28},{width:28}];
+    var maxBills=1;
+    grp.payments.forEach(function(p){ var n=getBillFiles(p).length; if(n>maxBills) maxBills=n; });
+    var evHdr=["#","Date","Amount (฿)","Purpose","💳 Payment Slip"];
+    for(var bi=1;bi<=maxBills;bi++) evHdr.push(maxBills>1 ? ("📄 Bill "+bi) : "📄 Bill / Invoice");
+    styleHdr(sa.addRow(evHdr),color);
+    var evCols=[{width:9},{width:12},{width:14},{width:30},{width:28}];
+    for(bi=0;bi<maxBills;bi++) evCols.push({width:28});
+    sa.columns=evCols;
     var ri=sa.rowCount+1;
     for(var pi=0;pi<grp.payments.length;pi++){
       var p=grp.payments[pi];
-      sa.getRow(ri).height=22;
-      sa.getCell("A"+ri).value="#"+showId(p);
-      sa.getCell("B"+ri).value=p.transaction_date||"";
-      sa.getCell("C"+ri).value=Number(p.amount)||0; sa.getCell("C"+ri).numFmt="#,##0.00"; sa.getCell("C"+ri).font={bold:true,color:{argb:"FF1565C0"}};
-      sa.getCell("D"+ri).value=p.purpose||""; sa.getCell("D"+ri).alignment={wrapText:true,vertical:"middle"};
+      var row=sa.getRow(ri); row.height=22;
+      row.getCell(1).value="#"+showId(p);
+      row.getCell(2).value=p.transaction_date||"";
+      row.getCell(3).value=Number(p.amount)||0; row.getCell(3).numFmt="#,##0.00"; row.getCell(3).font={bold:true,color:{argb:"FF1565C0"}};
+      row.getCell(4).value=p.purpose||""; row.getCell(4).alignment={wrapText:true,vertical:"middle"};
       if(p.imageFile){
-        sa.getCell("E"+ri).value={text:"🔗 View Slip",hyperlink:baseUrl+"/slips/"+p.imageFile};
-        sa.getCell("E"+ri).font={color:{argb:"FF1565C0"},underline:true,bold:true};
+        row.getCell(5).value={text:"🔗 View Slip",hyperlink:baseUrl+"/slips/"+p.imageFile};
+        row.getCell(5).font={color:{argb:"FF1565C0"},underline:true,bold:true};
       } else {
-        sa.getCell("E"+ri).value="No slip image";
-        sa.getCell("E"+ri).font={italic:true,color:{argb:"FF9E9E9E"}};
+        row.getCell(5).value="No slip image";
+        row.getCell(5).font={italic:true,color:{argb:"FF9E9E9E"}};
       }
-      if(p.billFile){
-        sa.getCell("F"+ri).value={text:"🔗 View Bill",hyperlink:baseUrl+"/bills/"+p.billFile};
-        sa.getCell("F"+ri).font={color:{argb:"FF2E7D32"},underline:true,bold:true};
-      } else {
-        sa.getCell("F"+ri).value="⚠️ No bill";
-        sa.getCell("F"+ri).font={italic:true,color:{argb:"FFBF360C"}};
+      var bills=getBillFiles(p);
+      for(bi=0;bi<maxBills;bi++){
+        var cell=row.getCell(6+bi);
+        if(bills[bi]){
+          cell.value={text:"🔗 View Bill"+(maxBills>1?(" "+(bi+1)):""),hyperlink:baseUrl+"/bills/"+bills[bi]};
+          cell.font={color:{argb:"FF2E7D32"},underline:true,bold:true};
+        } else if(bi===0){
+          cell.value="⚠️ No bill";
+          cell.font={italic:true,color:{argb:"FFBF360C"}};
+        }
       }
-      ["A","B","C","D","E","F"].forEach(function(col){
-        sa.getCell(col+ri).border={bottom:{style:"thin",color:{argb:"FFE0E0E0"}}};
-        if(!sa.getCell(col+ri).alignment) sa.getCell(col+ri).alignment={vertical:"middle"};
-      });
-      if(pi%2===0){["A","B","C","D"].forEach(function(col){sa.getCell(col+ri).fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFF8FBFF"}};});}
+      for(var ci=1;ci<=5+maxBills;ci++){
+        row.getCell(ci).border={bottom:{style:"thin",color:{argb:"FFE0E0E0"}}};
+        if(!row.getCell(ci).alignment) row.getCell(ci).alignment={vertical:"middle"};
+      }
+      if(pi%2===0){for(ci=1;ci<=4;ci++){row.getCell(ci).fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFF8FBFF"}};}}
       ri++;
     }
   }
@@ -442,7 +493,7 @@ async function handleEvent(event) {
       var list = loadPayments(); var now = new Date();
       var thisMonth = list.filter(function(p) { if (!p.transaction_date) return false; var d = parseISO(p.transaction_date); return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth(); });
       var total = thisMonth.reduce(function(s,p) { return s+(Number(p.amount)||0); }, 0);
-      var withBill = thisMonth.filter(function(p) { return p.billFile; }).length;
+      var withBill = thisMonth.filter(function(p) { return getBillFiles(p).length > 0; }).length;
       var inboxCount = loadInbox().length;
       var aMap = {}; thisMonth.forEach(function(p) { var k=(p.bank_from||"Unknown")+" ****"+(p.account_from||"????"); aMap[k]=(aMap[k]||0)+(Number(p.amount)||0); });
       var aLines = Object.entries(aMap).map(function(e) { return "  • "+e[0]+": ฿"+e[1].toLocaleString("th-TH",{minimumFractionDigits:2}); }).join("\n");
@@ -453,7 +504,7 @@ async function handleEvent(event) {
       var list = loadPayments();
       if (!list.length) return client.replyMessage(event.replyToken, { type: "text", text: "No payments recorded yet." });
       var recent = list.slice(-5).reverse();
-      var lines = recent.map(function(p) { return ["#"+showId(p)+"  "+(p.transaction_date||"?")+"  ฿"+Number(p.amount||0).toLocaleString("th-TH"),"  "+(p.bank_from||"?")+" ****"+(p.account_from||"????"),"  "+(p.purpose||"-")+"  "+(p.billFile?"📎✅":"⚠️")].join("\n"); });
+      var lines = recent.map(function(p) { return ["#"+showId(p)+"  "+(p.transaction_date||"?")+"  ฿"+Number(p.amount||0).toLocaleString("th-TH"),"  "+(p.bank_from||"?")+" ****"+(p.account_from||"????"),"  "+(p.purpose||"-")+"  "+(getBillFiles(p).length?"📎✅":"⚠️")].join("\n"); });
       return client.replyMessage(event.replyToken, { type: "text", text: "📋 Last 5:\n\n" + lines.join("\n\n") });
     }
 
@@ -467,7 +518,7 @@ async function handleEvent(event) {
         var list = loadPayments();
         var filtered = list.filter(function(p) { if (!p.transaction_date) return false; var d = parseISO(p.transaction_date); return d.getFullYear() === year && d.getMonth()+1 === month; });
         var total = filtered.reduce(function(s,p){return s+(Number(p.amount)||0);},0);
-        var withBill = filtered.filter(function(p){return p.billFile;}).length;
+        var withBill = filtered.filter(function(p){return getBillFiles(p).length > 0;}).length;
         var accts = {}; filtered.forEach(function(p){accts[(p.bank_from||"?")+" ****"+(p.account_from||"????")] = true;});
         return client.pushMessage(gid, { type: "text", text: ["✅ Report ready — "+format(new Date(year,month-1),"MMMM yyyy"),"📋 "+filtered.length+" transactions","💰 ฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2}),"🏦 "+Object.keys(accts).length+" account sheet(s)","📎 Bill evidence: "+withBill+"/"+filtered.length,"","⬇️ Download Excel:",BASE_URL+"/api/report?year="+year+"&month="+month].join("\n") });
       } catch(err) {
@@ -599,7 +650,9 @@ app.post("/api/match", auth, function(req, res) {
   if (!force && slipAmt !== null && billAmt !== null && Math.abs(slipAmt - billAmt) > 1) {
     return res.json({ warning: true, slipAmount: slipAmt, billAmount: billAmt });
   }
-  list[pIdx].billFile = inbox[iIdx].file;
+  var bills = getBillFiles(list[pIdx]);
+  bills.push(inbox[iIdx].file);
+  setBillFiles(list[pIdx], bills);
   savePayments(list);
   inbox.splice(iIdx, 1);
   saveInbox(inbox);
@@ -611,13 +664,102 @@ app.post("/api/unmatch", auth, function(req, res) {
   var list = loadPayments();
   var pIdx = list.findIndex(function(p) { return String(p.id) === String(req.body.slipId); });
   if (pIdx === -1) return res.status(404).json({ error: "slip not found" });
-  if (!list[pIdx].billFile) return res.status(400).json({ error: "no bill attached" });
-  var inbox = loadInbox();
-  inbox.push({ id: "ib" + Date.now(), file: list[pIdx].billFile, type: "bill", billAmount: null, uploadedAt: new Date().toISOString(), source: "unmatch" });
-  saveInbox(inbox);
-  list[pIdx].billFile = null;
+  var bills = getBillFiles(list[pIdx]);
+  if (!bills.length) return res.status(400).json({ error: "no bill attached" });
+  bills.forEach(function(f) { moveToInboxAsItem(f, "bill", null, "unmatch"); });
+  setBillFiles(list[pIdx], []);
   savePayments(list);
   res.json({ ok: true });
+});
+
+// Remove ONE bill from a slip → back to inbox
+app.post("/api/slips/:id/remove-bill", auth, function(req, res) {
+  var list = loadPayments();
+  var idx = list.findIndex(function(p) { return String(p.id) === String(req.params.id); });
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  var bills = getBillFiles(list[idx]);
+  var f = req.body.file;
+  var bIdx = bills.indexOf(f);
+  if (bIdx === -1) return res.status(404).json({ error: "bill not on this slip" });
+  bills.splice(bIdx, 1);
+  setBillFiles(list[idx], bills);
+  savePayments(list);
+  moveToInboxAsItem(f, "bill", null, "removed");
+  res.json({ ok: true, record: list[idx] });
+});
+
+// Add a bill directly to a slip by upload (no AI — user chose the slip)
+app.post("/api/slips/:id/bill-upload", auth, function(req, res) {
+  try {
+    var list = loadPayments();
+    var idx = list.findIndex(function(p) { return String(p.id) === String(req.params.id); });
+    if (idx === -1) return res.status(404).json({ error: "not found" });
+    var b64 = (req.body && req.body.imageBase64) || "";
+    b64 = b64.replace(/^data:image\/\w+;base64,/, "");
+    if (!b64) return res.status(400).json({ error: "no image" });
+    var buf = Buffer.from(b64, "base64");
+    var fname = "img_" + Date.now() + "_" + Math.floor(Math.random()*1000) + ".jpg";
+    fs.writeFileSync(path.join(BILLS_DIR, fname), buf);
+    var bills = getBillFiles(list[idx]);
+    bills.push(fname);
+    setBillFiles(list[idx], bills);
+    savePayments(list);
+    res.json({ ok: true, record: list[idx] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Send a recorded slip back to the inbox (deletes the transaction; bills return too)
+app.post("/api/slips/:id/to-inbox", auth, function(req, res) {
+  var list = loadPayments();
+  var idx = list.findIndex(function(p) { return String(p.id) === String(req.params.id); });
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  var p = list[idx];
+  getBillFiles(p).forEach(function(f) { moveToInboxAsItem(f, "bill", null, "back"); });
+  if (p.imageFile) {
+    var oldPath = path.join(SLIPS_DIR, p.imageFile);
+    var newName = "img_" + Date.now() + "_" + Math.floor(Math.random()*1000) + ".jpg";
+    try {
+      if (fs.existsSync(oldPath)) fs.renameSync(oldPath, path.join(BILLS_DIR, newName));
+      moveToInboxAsItem(newName, "unknown", null, "back");
+    } catch (e) { console.error("to-inbox move error:", e.message); }
+  }
+  list.splice(idx, 1);
+  savePayments(list);
+  res.json({ ok: true });
+});
+
+// Batch inbox actions: mark as bill (instant, amounts read in background) or delete
+app.post("/api/inbox/batch", auth, function(req, res) {
+  var ids = Array.isArray(req.body.ids) ? req.body.ids : [];
+  var action = req.body.action;
+  if (!ids.length) return res.status(400).json({ error: "no ids" });
+  var inbox = loadInbox();
+  if (action === "bill") {
+    var needAmount = [];
+    ids.forEach(function(id) {
+      var idx = inbox.findIndex(function(x) { return x.id === id; });
+      if (idx === -1) return;
+      inbox[idx].type = "bill";
+      if (inbox[idx].billAmount === null || inbox[idx].billAmount === undefined) needAmount.push(id);
+    });
+    saveInbox(inbox);
+    if (needAmount.length) readInboxAmountsInBackground(needAmount);
+    return res.json({ ok: true, marked: ids.length, readingAmounts: needAmount.length });
+  }
+  if (action === "delete") {
+    var deleted = 0;
+    ids.forEach(function(id) {
+      var idx = inbox.findIndex(function(x) { return x.id === id; });
+      if (idx === -1) return;
+      var fp = path.join(BILLS_DIR, inbox[idx].file);
+      if (fs.existsSync(fp)) { try { fs.unlinkSync(fp); } catch(e) {} }
+      inbox.splice(idx, 1);
+      deleted++;
+    });
+    saveInbox(inbox);
+    return res.json({ ok: true, deleted: deleted });
+  }
+  res.status(400).json({ error: "unknown action" });
 });
 
 // Edit slip fields
