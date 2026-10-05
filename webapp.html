@@ -10,7 +10,6 @@
 *{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:'Sarabun',sans-serif;background:var(--bg);color:var(--text);padding-bottom:80px;}
 .hidden{display:none!important;}
-/* login */
 #loginView{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;}
 .login-card{background:#fff;border-radius:16px;padding:32px 24px;width:100%;max-width:360px;box-shadow:0 8px 32px rgba(21,101,192,.15);text-align:center;}
 .login-card h1{font-size:22px;margin-bottom:6px;}
@@ -19,69 +18,74 @@ input,select{width:100%;padding:12px;border:1px solid var(--border);border-radiu
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:12px 18px;border:none;border-radius:10px;font-family:'Sarabun';font-size:14px;font-weight:700;cursor:pointer;transition:.15s;}
 .btn-blue{background:var(--blue);color:#fff;}.btn-blue:active{background:var(--blue-d);}
 .btn-green{background:var(--green);color:#fff;}
+.btn-orange{background:var(--orange);color:#fff;}
 .btn-red{background:#FFEBEE;color:var(--red);}
 .btn-gray{background:#EEF2FA;color:var(--text);}
 .btn-sm{padding:7px 12px;font-size:12px;border-radius:8px;}
 .btn-full{width:100%;margin-top:14px;}
 #loginErr{color:var(--red);font-size:13px;margin-top:10px;min-height:18px;}
-/* header */
 .topbar{position:sticky;top:0;z-index:50;background:var(--blue);color:#fff;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;}
 .topbar b{font-size:16px;}
-/* tabs */
 .tabs{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--border);display:flex;z-index:50;}
 .tab{flex:1;text-align:center;padding:10px 4px 12px;font-size:11px;color:var(--text2);cursor:pointer;}
 .tab .ico{font-size:20px;display:block;margin-bottom:2px;}
 .tab.active{color:var(--blue);font-weight:700;}
 .badge{display:inline-block;min-width:18px;padding:1px 5px;border-radius:10px;background:var(--red);color:#fff;font-size:10px;font-weight:700;}
-/* content */
 .view{padding:16px;max-width:760px;margin:0 auto;}
-.card{background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:12px;}
+.card{background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:12px;position:relative;}
 .card img.thumb{width:100%;max-height:220px;object-fit:contain;border-radius:8px;background:#F7F9FF;cursor:pointer;}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
 .mt{margin-top:10px;}
 .tag{display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:700;}
 .tag-bill{background:#E8F5E9;color:var(--green);}
 .tag-unknown{background:#FFF3E0;color:var(--orange);}
-.tag-slip{background:#E3F2FD;color:var(--blue);}
 .amt{font-weight:700;color:var(--blue);}
 .small{font-size:12px;color:var(--text2);}
 .section-title{font-size:14px;font-weight:700;margin:14px 0 8px;}
 .empty{text-align:center;color:var(--text2);padding:40px 10px;font-size:14px;}
-/* slip list item */
 .slip-item{background:#fff;border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px;}
-.slip-item.selected{border:2px solid var(--blue);background:#F3F8FF;}
 .slip-head{display:flex;justify-content:space-between;align-items:center;gap:8px;}
 .slip-id{font-weight:700;font-size:14px;}
-.pill{font-size:11px;padding:2px 8px;border-radius:10px;}
-.pill-ok{background:#E8F5E9;color:var(--green);}
-.pill-no{background:#FFF3E0;color:var(--orange);}
-/* match layout */
 .match-cols{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
 .match-col h3{font-size:13px;margin-bottom:8px;text-align:center;}
 .mini{border:1px solid var(--border);border-radius:10px;padding:8px;margin-bottom:8px;background:#fff;cursor:pointer;font-size:12px;}
 .mini.selected{border:2px solid var(--blue);background:#F3F8FF;}
 .mini img{width:100%;height:80px;object-fit:cover;border-radius:6px;margin-bottom:4px;}
-/* toast + modal */
 #toast{position:fixed;bottom:76px;left:50%;transform:translateX(-50%) translateY(100px);background:var(--text);color:#fff;padding:10px 18px;border-radius:10px;font-size:13px;opacity:0;transition:.3s;z-index:100;max-width:90%;text-align:center;}
 #toast.show{transform:translateX(-50%) translateY(0);opacity:1;}
-#modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:99;padding:16px;}
-#modal.open{display:flex;}
-.modal-box{background:#fff;border-radius:14px;padding:20px;width:100%;max-width:420px;max-height:85vh;overflow-y:auto;}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:99;padding:16px;}
+.modal.open{display:flex;}
+.modal-box{background:#fff;border-radius:14px;padding:20px;width:100%;max-width:440px;max-height:85vh;overflow-y:auto;}
 .modal-box h3{font-size:16px;margin-bottom:12px;}
 .field{margin-bottom:10px;}
 .field label{display:block;font-size:11px;color:var(--text2);margin-bottom:3px;font-weight:700;}
-/* progress */
-.prog-item{display:flex;justify-content:space-between;font-size:13px;padding:6px 0;border-bottom:1px solid var(--border);}
+.prog-item{display:flex;justify-content:space-between;font-size:13px;padding:6px 0;border-bottom:1px solid var(--border);gap:8px;}
+.prog-item span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 input[type=file]{display:none;}
 .upload-zone{border:2px dashed var(--blue);border-radius:14px;padding:36px 16px;text-align:center;color:var(--blue);background:#F7FAFF;cursor:pointer;font-weight:700;}
 #imgView{position:fixed;inset:0;background:rgba(0,0,0,.9);display:none;align-items:center;justify-content:center;z-index:200;}
 #imgView.open{display:flex;}
 #imgView img{max-width:95%;max-height:92%;object-fit:contain;}
+/* inbox selection */
+.sel-head{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin-bottom:12px;font-size:13px;font-weight:700;}
+.cb{width:22px;height:22px;flex:none;accent-color:var(--blue);}
+.card .cb-wrap{position:absolute;top:10px;left:10px;background:rgba(255,255,255,.95);border:1px solid var(--border);border-radius:8px;padding:5px;display:flex;z-index:2;}
+#actionBar{position:fixed;bottom:62px;left:0;right:0;z-index:60;background:var(--blue-d);color:#fff;padding:10px 14px;display:none;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;}
+#actionBar.show{display:flex;}
+#actionBar .count{font-weight:700;font-size:13px;margin-right:4px;}
+#batchProg{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:150;padding:16px;}
+#batchProg.open{display:flex;}
+.prog-box{background:#fff;border-radius:14px;padding:22px;width:100%;max-width:400px;text-align:center;}
+.prog-track{background:#E6EDFC;border-radius:10px;height:14px;margin:14px 0;overflow:hidden;}
+.prog-fill{background:var(--blue);height:100%;width:0%;transition:.3s;}
+.bill-thumbs{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.bill-thumb{border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#F7F9FF;}
+.bill-thumb img{width:100%;height:110px;object-fit:cover;cursor:pointer;display:block;}
+.bill-thumb .bt-actions{padding:6px;display:flex;justify-content:space-between;align-items:center;font-size:11px;}
 </style>
 </head>
 <body>
 
-<!-- LOGIN -->
 <div id="loginView">
   <div class="login-card">
     <h1>💳 Slip Tracker</h1>
@@ -92,7 +96,6 @@ input[type=file]{display:none;}
   </div>
 </div>
 
-<!-- APP -->
 <div id="appView" class="hidden">
   <div class="topbar">
     <b>💳 Slip Tracker</b>
@@ -101,15 +104,17 @@ input[type=file]{display:none;}
 
   <!-- INBOX -->
   <div class="view" id="view-inbox">
-    <div class="section-title">📥 Inbox — unorganized images</div>
+    <div class="sel-head">
+      <input type="checkbox" class="cb" id="selAll" onchange="toggleSelectAll(this.checked)">
+      <label for="selAll" style="cursor:pointer">Select all</label>
+      <span class="small" id="inboxCount" style="margin-left:auto;font-weight:400"></span>
+    </div>
     <div id="inboxList"></div>
   </div>
 
   <!-- SLIPS -->
   <div class="view hidden" id="view-slips">
-    <div class="row">
-      <select id="slipMonth" onchange="loadSlips()" style="flex:1"></select>
-    </div>
+    <div class="row"><select id="slipMonth" onchange="loadSlips()" style="flex:1"></select></div>
     <div id="slipList" class="mt"></div>
   </div>
 
@@ -143,7 +148,13 @@ input[type=file]{display:none;}
     </div>
   </div>
 
-  <!-- TABS -->
+  <div id="actionBar">
+    <span class="count" id="selCount">0 selected</span>
+    <button class="btn btn-sm btn-blue" onclick="batchAsSlip()">🧾 Mark as Slip</button>
+    <button class="btn btn-sm btn-green" onclick="batchAsBill()">📄 Mark as Bill</button>
+    <button class="btn btn-sm" style="background:#fff;color:var(--red)" onclick="batchDelete()">🗑 Delete</button>
+  </div>
+
   <div class="tabs">
     <div class="tab active" data-v="inbox" onclick="switchTab('inbox')"><span class="ico">📥</span>Inbox <span class="badge hidden" id="inboxBadge">0</span></div>
     <div class="tab" data-v="slips" onclick="switchTab('slips')"><span class="ico">🧾</span>Slips</div>
@@ -156,15 +167,40 @@ input[type=file]{display:none;}
 <div id="toast"></div>
 <div id="imgView" onclick="this.classList.remove('open')"><img id="imgViewImg"></div>
 
-<!-- EDIT MODAL -->
-<div id="modal">
+<!-- batch slip-reading progress -->
+<div id="batchProg">
+  <div class="prog-box">
+    <h3 id="bpTitle">🔍 Reading slips...</h3>
+    <div class="prog-track"><div class="prog-fill" id="bpFill"></div></div>
+    <div class="small" id="bpText">0 / 0</div>
+    <div class="small mt" id="bpNote">Please keep this page open</div>
+  </div>
+</div>
+
+<!-- edit modal -->
+<div id="editModal" class="modal">
   <div class="modal-box">
     <h3>✏️ Edit Transaction</h3>
     <div id="editFields"></div>
     <div class="row mt">
       <button class="btn btn-blue" style="flex:1" onclick="saveEdit()">Save</button>
-      <button class="btn btn-gray" style="flex:1" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-gray" style="flex:1" onclick="closeEdit()">Cancel</button>
     </div>
+  </div>
+</div>
+
+<!-- bills modal (view / add / remove bills of one slip) -->
+<div id="billsModal" class="modal">
+  <div class="modal-box">
+    <h3 id="bmTitle">📄 Bills</h3>
+    <div id="bmThumbs" class="bill-thumbs"></div>
+    <div class="section-title">＋ Add bill</div>
+    <button class="btn btn-orange btn-full" style="margin-top:0" onclick="document.getElementById('bmFile').click()">📸 Upload from device</button>
+    <input type="file" id="bmFile" accept="image/*" multiple onchange="bmUpload(this.files)">
+    <div id="bmUploadProg"></div>
+    <div class="section-title" id="bmInboxTitle">…or pick from inbox</div>
+    <div id="bmInboxList"></div>
+    <button class="btn btn-gray btn-full" onclick="closeBills()">Close</button>
   </div>
 </div>
 
@@ -172,29 +208,31 @@ input[type=file]{display:none;}
 var TOKEN = localStorage.getItem("st_token") || "";
 var selectedSlip = null, selectedBill = null, editId = null;
 var slipsCache = [], inboxCache = [];
+var selectedInbox = {};   // id -> true
+var billsSlipId = null;   // slip currently open in bills modal
 
 function api(method, url, body) {
   return fetch(url, {
     method: method,
-    headers: Object.assign({ "Content-Type": "application/json", "x-auth": TOKEN }, {}),
+    headers: { "Content-Type": "application/json", "x-auth": TOKEN },
     body: body ? JSON.stringify(body) : undefined
   }).then(function(r) {
     if (r.status === 401) { showLogin(); throw new Error("unauthorized"); }
     return r.json();
   });
 }
-
 function toast(msg) {
   var t = document.getElementById("toast");
   t.textContent = msg;
   t.classList.add("show");
   setTimeout(function(){ t.classList.remove("show"); }, 2600);
 }
-
 function viewImg(src) {
   document.getElementById("imgViewImg").src = src;
   document.getElementById("imgView").classList.add("open");
 }
+function esc(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;"); }
+function bills(p){ return Array.isArray(p.billFiles) ? p.billFiles : (p.billFile ? [p.billFile] : []); }
 
 // ── Auth ──
 function login() {
@@ -221,6 +259,7 @@ function switchTab(v) {
   document.querySelectorAll(".view").forEach(function(el){ el.classList.add("hidden"); });
   document.getElementById("view-"+v).classList.remove("hidden");
   document.querySelectorAll(".tab").forEach(function(el){ el.classList.toggle("active", el.getAttribute("data-v")===v); });
+  updateActionBar();
   if (v==="inbox") loadInbox();
   if (v==="slips") loadSlips();
   if (v==="match") loadMatch();
@@ -230,40 +269,114 @@ function switchTab(v) {
 function loadInbox() {
   api("GET","/api/inbox").then(function(items) {
     inboxCache = items;
+    // drop selections that no longer exist
+    var alive = {};
+    items.forEach(function(it){ if (selectedInbox[it.id]) alive[it.id]=true; });
+    selectedInbox = alive;
     var badge = document.getElementById("inboxBadge");
     badge.textContent = items.length;
     badge.classList.toggle("hidden", items.length===0);
+    document.getElementById("inboxCount").textContent = items.length + " item" + (items.length===1?"":"s");
     var el = document.getElementById("inboxList");
-    if (!items.length) { el.innerHTML = '<div class="empty">📭 Inbox empty — all organized!</div>'; return; }
+    if (!items.length) { el.innerHTML = '<div class="empty">📭 Inbox empty — all organized!</div>'; document.getElementById("selAll").checked=false; updateActionBar(); return; }
     el.innerHTML = items.map(function(it) {
       var tag = it.type==="bill" ? '<span class="tag tag-bill">BILL'+(it.billAmount!=null?' ฿'+Number(it.billAmount).toLocaleString("th-TH"):'')+'</span>' : '<span class="tag tag-unknown">UNKNOWN</span>';
+      var checked = selectedInbox[it.id] ? "checked" : "";
       return '<div class="card">'+
-        '<img class="thumb" src="/bills/'+it.file+'" onclick="viewImg(this.src)">'+
-        '<div class="row mt">'+tag+'<span class="small">'+new Date(it.uploadedAt).toLocaleString("th-TH")+' · '+(it.source||"")+'</span></div>'+
+        '<div class="cb-wrap"><input type="checkbox" class="cb" '+checked+' onchange="toggleSel(\''+it.id+'\', this.checked)"></div>'+
+        '<img class="thumb" src="/bills/'+esc(it.file)+'" onclick="viewImg(this.src)">'+
+        '<div class="row mt">'+tag+'<span class="small">'+new Date(it.uploadedAt).toLocaleString("th-TH")+' · '+esc(it.source||"")+'</span></div>'+
         '<div class="row mt">'+
-          '<button class="btn btn-blue btn-sm" onclick="asSlip(\''+it.id+'\')">🧾 It\'s a Slip</button>'+
-          '<button class="btn btn-green btn-sm" onclick="asBill(\''+it.id+'\')">📄 It\'s a Bill</button>'+
-          '<button class="btn btn-red btn-sm" onclick="delInbox(\''+it.id+'\')">🗑 Delete</button>'+
+          '<button class="btn btn-blue btn-sm" onclick="oneAsSlip(\''+it.id+'\')">🧾 It\'s a Slip</button>'+
+          '<button class="btn btn-green btn-sm" onclick="oneAsBill(\''+it.id+'\')">📄 It\'s a Bill</button>'+
+          '<button class="btn btn-red btn-sm" onclick="delInbox(\''+it.id+'\')">🗑</button>'+
         '</div></div>';
     }).join("");
+    syncSelAll();
+    updateActionBar();
   });
 }
-function asSlip(id) {
-  toast("🔍 Reading slip...");
-  api("POST","/api/inbox/"+id+"/as-slip").then(function(d) {
-    if (d.record) { toast("✅ Slip #"+(d.record.display_id||d.record.id)+" created"); loadInbox(); loadSlips(); }
-    else toast("❌ "+(d.error||"Could not read as slip"));
-  });
+function toggleSel(id, on) {
+  if (on) selectedInbox[id] = true; else delete selectedInbox[id];
+  syncSelAll();
+  updateActionBar();
 }
-function asBill(id) {
-  api("POST","/api/inbox/"+id+"/as-bill").then(function(d) {
-    if (d.item) { toast("📄 Marked as bill"+(d.item.billAmount!=null?" ฿"+Number(d.item.billAmount).toLocaleString("th-TH"):"")); loadInbox(); loadMatch(); }
-    else toast("❌ "+(d.error||"error"));
-  });
+function toggleSelectAll(on) {
+  selectedInbox = {};
+  if (on) inboxCache.forEach(function(it){ selectedInbox[it.id]=true; });
+  loadInbox();
+}
+function syncSelAll() {
+  var n = Object.keys(selectedInbox).length;
+  document.getElementById("selAll").checked = (n>0 && n===inboxCache.length);
+}
+function updateActionBar() {
+  var n = Object.keys(selectedInbox).length;
+  var onInbox = !document.getElementById("view-inbox").classList.contains("hidden");
+  document.getElementById("selCount").textContent = n + " selected";
+  document.getElementById("actionBar").classList.toggle("show", onInbox && n>0);
+}
+function oneAsSlip(id){ runBatchAsSlip([id]); }
+function oneAsBill(id){
+  api("POST","/api/inbox/batch",{ids:[id],action:"bill"}).then(function(){ toast("📄 Marked as bill — reading amount..."); loadInbox(); loadMatch(); setTimeout(loadInbox, 7000); });
 }
 function delInbox(id) {
   if (!confirm("Delete this image?")) return;
-  api("DELETE","/api/inbox/"+id).then(function(){ toast("🗑 Deleted"); loadInbox(); loadMatch(); });
+  api("POST","/api/inbox/batch",{ids:[id],action:"delete"}).then(function(){ toast("🗑 Deleted"); loadInbox(); loadMatch(); });
+}
+
+// ── Batch actions ──
+function selIds(){ return Object.keys(selectedInbox); }
+function batchAsBill() {
+  var ids = selIds(); if (!ids.length) return;
+  api("POST","/api/inbox/batch",{ids:ids,action:"bill"}).then(function(d) {
+    toast("📄 "+d.marked+" marked as bill"+(d.readingAmounts?(" — reading "+d.readingAmounts+" amounts in background"):""));
+    selectedInbox = {};
+    loadInbox(); loadMatch();
+    if (d.readingAmounts) setTimeout(function(){ loadInbox(); loadMatch(); }, Math.min(d.readingAmounts,6)*6000);
+  });
+}
+function batchDelete() {
+  var ids = selIds(); if (!ids.length) return;
+  if (!confirm("Delete "+ids.length+" image(s)? This cannot be undone.")) return;
+  api("POST","/api/inbox/batch",{ids:ids,action:"delete"}).then(function(d) {
+    toast("🗑 Deleted "+d.deleted);
+    selectedInbox = {};
+    loadInbox(); loadMatch();
+  });
+}
+function batchAsSlip() {
+  var ids = selIds(); if (!ids.length) return;
+  runBatchAsSlip(ids);
+}
+function runBatchAsSlip(ids) {
+  var total = ids.length, ok = 0, fail = 0;
+  var bp = document.getElementById("batchProg");
+  document.getElementById("bpTitle").textContent = "🔍 Reading slip" + (total>1?"s":"") + "...";
+  document.getElementById("bpFill").style.width = "0%";
+  document.getElementById("bpText").textContent = "0 / " + total;
+  document.getElementById("bpNote").textContent = "Please keep this page open";
+  bp.classList.add("open");
+  var i = 0;
+  function next() {
+    if (i >= total) {
+      bp.classList.remove("open");
+      toast("✅ "+ok+" slip(s) created" + (fail?(" · ⚠️ "+fail+" failed (still in inbox)"):""));
+      selectedInbox = {};
+      loadInbox(); loadSlips(); loadMatch();
+      return;
+    }
+    var id = ids[i];
+    api("POST","/api/inbox/"+id+"/as-slip").then(function(d) {
+      if (d && d.record) ok++; else fail++;
+    }).catch(function(){ fail++; }).then(function() {
+      i++;
+      document.getElementById("bpFill").style.width = Math.round(i/total*100) + "%";
+      document.getElementById("bpText").textContent = i + " / " + total + (fail?("  (⚠️ "+fail+")"):"");
+      next();
+    });
+  }
+  next();
 }
 
 // ── Slips ──
@@ -273,21 +386,19 @@ function initMonthPickers() {
   sel.innerHTML = "";
   for (var i=0;i<14;i++) {
     var d = new Date(now.getFullYear(), now.getMonth()-i, 1);
-    var val = d.getFullYear()+"-"+(d.getMonth()+1);
     var opt = document.createElement("option");
-    opt.value = val;
+    opt.value = d.getFullYear()+"-"+(d.getMonth()+1);
     opt.textContent = d.toLocaleDateString("en-US",{month:"long",year:"numeric"});
     sel.appendChild(opt);
   }
   var noDate = document.createElement("option");
   noDate.value = "nodate"; noDate.textContent = "⚠️ No date (fix these)";
   sel.appendChild(noDate);
-  // report pickers
   var ry = document.getElementById("repYear"), rm = document.getElementById("repMonth");
   ry.innerHTML=""; rm.innerHTML="";
   for (var y=now.getFullYear(); y>=now.getFullYear()-2; y--) { var o=document.createElement("option"); o.value=y; o.textContent=y; ry.appendChild(o); }
   var mn=["January","February","March","April","May","June","July","August","September","October","November","December"];
-  mn.forEach(function(m,i){ var o=document.createElement("option"); o.value=i+1; o.textContent=m; rm.appendChild(o); });
+  mn.forEach(function(m,ix){ var o=document.createElement("option"); o.value=ix+1; o.textContent=m; rm.appendChild(o); });
   rm.value = now.getMonth()+1;
 }
 function loadSlips() {
@@ -306,28 +417,132 @@ function loadSlips() {
     var el = document.getElementById("slipList");
     if (!list.length) { el.innerHTML = '<div class="empty">No transactions in this month</div>'; return; }
     el.innerHTML = list.slice().reverse().map(function(p) {
-      var billPill = p.billFile ? '<span class="pill pill-ok">📎 bill ✅</span>' : '<span class="pill pill-no">⚠️ no bill</span>';
+      var bl = bills(p);
+      var billBtn = bl.length
+        ? '<button class="btn btn-green btn-sm" onclick="openBills('+p.id+')">📄 Bills ('+bl.length+')</button>'
+        : '<button class="btn btn-orange btn-sm" onclick="openBills('+p.id+')">＋ Add bill</button>';
       return '<div class="slip-item">'+
-        '<div class="slip-head"><span class="slip-id">#'+(p.display_id||p.id)+'</span><span class="amt">฿'+Number(p.amount||0).toLocaleString("th-TH",{minimumFractionDigits:2})+'</span></div>'+
-        '<div class="small mt">'+(p.transaction_date||"⚠️ no date")+' '+(p.transaction_time||"")+' · '+(p.bank_from||"?")+' ****'+(p.account_from||"????")+' → '+(p.recipient_name||p.bank_to||"?")+'</div>'+
-        '<div class="small">'+(p.purpose||"-")+'</div>'+
-        '<div class="row mt">'+billPill+
-          (p.imageFile?'<button class="btn btn-gray btn-sm" onclick="viewImg(\'/slips/'+p.imageFile+'\')">🧾 Slip</button>':'')+
-          (p.billFile?'<button class="btn btn-gray btn-sm" onclick="viewImg(\'/bills/'+p.billFile+'\')">📄 Bill</button>':'')+
-          (p.billFile?'<button class="btn btn-red btn-sm" onclick="unmatch('+p.id+')">✂️ Unmatch</button>':'')+
+        '<div class="slip-head"><span class="slip-id">#'+esc(p.display_id||p.id)+'</span><span class="amt">฿'+Number(p.amount||0).toLocaleString("th-TH",{minimumFractionDigits:2})+'</span></div>'+
+        '<div class="small mt">'+(p.transaction_date||"⚠️ no date")+' '+(p.transaction_time||"")+' · '+esc(p.bank_from||"?")+' ****'+esc(p.account_from||"????")+' → '+esc(p.recipient_name||p.bank_to||"?")+'</div>'+
+        '<div class="small">'+esc(p.purpose||"-")+'</div>'+
+        '<div class="row mt">'+
+          billBtn+
+          (p.imageFile?'<button class="btn btn-gray btn-sm" onclick="viewImg(\'/slips/'+esc(p.imageFile)+'\')">🧾 Slip</button>':'')+
           '<button class="btn btn-blue btn-sm" onclick="openEdit('+p.id+')">✏️ Edit</button>'+
+          '<button class="btn btn-gray btn-sm" onclick="backToInbox('+p.id+')">↩️ Back to inbox</button>'+
           '<button class="btn btn-red btn-sm" onclick="delSlip('+p.id+')">🗑</button>'+
         '</div></div>';
     }).join("");
   });
 }
 function delSlip(id) {
-  if (!confirm("Delete this transaction completely?")) return;
+  if (!confirm("Delete this transaction completely? The slip image and record are removed.")) return;
   api("DELETE","/api/slips/"+id).then(function(){ toast("🗑 Deleted"); loadSlips(); loadMatch(); });
 }
-function unmatch(id) {
-  if (!confirm("Detach bill from this slip? Bill goes back to inbox.")) return;
-  api("POST","/api/unmatch",{slipId:id}).then(function(){ toast("✂️ Unmatched"); loadSlips(); loadInbox(); loadMatch(); });
+function backToInbox(id) {
+  if (!confirm("Send this slip back to the inbox?\n\n⚠️ The transaction record and any edits you made are deleted. The image (and its bills) return to the inbox as unsorted items.")) return;
+  api("POST","/api/slips/"+id+"/to-inbox").then(function(d){
+    if (d.ok) { toast("↩️ Sent back to inbox"); loadSlips(); loadInbox(); loadMatch(); }
+    else toast("❌ "+(d.error||"error"));
+  });
+}
+
+// ── Bills modal ──
+function openBills(id) {
+  billsSlipId = id;
+  document.getElementById("bmUploadProg").innerHTML = "";
+  renderBillsModal();
+  document.getElementById("billsModal").classList.add("open");
+}
+function closeBills(){ document.getElementById("billsModal").classList.remove("open"); billsSlipId=null; loadSlips(); loadMatch(); loadInbox(); }
+function renderBillsModal() {
+  var p = slipsCache.find(function(x){ return x.id===billsSlipId; });
+  if (!p) { closeBills(); return; }
+  var bl = bills(p);
+  document.getElementById("bmTitle").textContent = "📄 Bills of #"+(p.display_id||p.id)+" — ฿"+Number(p.amount||0).toLocaleString("th-TH");
+  document.getElementById("bmThumbs").innerHTML = bl.length ? bl.map(function(f,ix) {
+    return '<div class="bill-thumb">'+
+      '<img src="/bills/'+esc(f)+'" onclick="viewImg(this.src)">'+
+      '<div class="bt-actions"><b>Bill '+(ix+1)+'</b><button class="btn btn-red btn-sm" onclick="removeBill(\''+esc(f)+'\')">Remove</button></div>'+
+      '</div>';
+  }).join("") : '<div class="small" style="grid-column:1/-1;text-align:center;padding:10px">No bills attached yet</div>';
+  // inbox bills, same-amount first
+  api("GET","/api/inbox").then(function(items) {
+    var slipAmt = Number(p.amount)||null;
+    var billsIn = items.filter(function(x){ return x.type==="bill"; });
+    billsIn.sort(function(a,b) {
+      var am = (a.billAmount!=null && slipAmt!=null && Math.abs(a.billAmount-slipAmt)<=1) ? 0 : 1;
+      var bm = (b.billAmount!=null && slipAmt!=null && Math.abs(b.billAmount-slipAmt)<=1) ? 0 : 1;
+      return am-bm;
+    });
+    document.getElementById("bmInboxTitle").style.display = billsIn.length ? "" : "none";
+    document.getElementById("bmInboxList").innerHTML = billsIn.map(function(b) {
+      var sameAmt = (b.billAmount!=null && slipAmt!=null && Math.abs(b.billAmount-slipAmt)<=1);
+      return '<div class="mini" onclick="pickInboxBill(\''+b.id+'\')" style="display:flex;gap:8px;align-items:center">'+
+        '<img src="/bills/'+esc(b.file)+'" style="width:56px;height:56px;margin:0;flex:none">'+
+        '<div>'+(b.billAmount!=null?('<span class="amt">฿'+Number(b.billAmount).toLocaleString("th-TH")+'</span>'):'<span class="small">amount unknown</span>')+
+        (sameAmt?' <span class="tag tag-bill">same amount ✅</span>':'')+'</div></div>';
+    }).join("");
+  });
+}
+function removeBill(file) {
+  if (!confirm("Remove this bill from the slip? It goes back to the inbox.")) return;
+  api("POST","/api/slips/"+billsSlipId+"/remove-bill",{file:file}).then(function(d) {
+    if (d.ok) { toast("↩️ Bill moved to inbox"); refreshSlipsCacheThen(renderBillsModal); }
+    else toast("❌ "+(d.error||"error"));
+  });
+}
+function pickInboxBill(inboxId) {
+  api("POST","/api/match",{slipId:billsSlipId,inboxId:inboxId}).then(function(d) {
+    if (d.warning) {
+      var ok = confirm("⚠️ Amounts don't match!\nSlip: ฿"+Number(d.slipAmount).toLocaleString("th-TH")+"\nBill: ฿"+Number(d.billAmount).toLocaleString("th-TH")+"\n\nAttach anyway?");
+      if (!ok) return;
+      api("POST","/api/match",{slipId:billsSlipId,inboxId:inboxId,force:true}).then(function() { toast("✅ Bill attached"); refreshSlipsCacheThen(renderBillsModal); });
+      return;
+    }
+    if (d.matched) { toast("✅ Bill attached"); refreshSlipsCacheThen(renderBillsModal); }
+    else toast("❌ "+(d.error||"error"));
+  });
+}
+function bmUpload(files) {
+  if (!files || !files.length) return;
+  var prog = document.getElementById("bmUploadProg");
+  var arr = Array.from(files);
+  var i = 0;
+  function next() {
+    if (i >= arr.length) { toast("✅ "+arr.length+" bill(s) attached"); refreshSlipsCacheThen(renderBillsModal); return; }
+    var f = arr[i];
+    var rowEl = document.createElement("div");
+    rowEl.className = "prog-item";
+    rowEl.innerHTML = "<span>"+esc(f.name)+"</span><span>⏳</span>";
+    prog.appendChild(rowEl);
+    var reader = new FileReader();
+    reader.onload = function() {
+      api("POST","/api/slips/"+billsSlipId+"/bill-upload",{imageBase64: reader.result}).then(function(d) {
+        rowEl.children[1].textContent = d.ok ? "✅" : "❌";
+        i++; next();
+      }).catch(function(){ rowEl.children[1].textContent = "❌"; i++; next(); });
+    };
+    reader.readAsDataURL(f);
+  }
+  next();
+  document.getElementById("bmFile").value = "";
+}
+function refreshSlipsCacheThen(cb) {
+  var v = document.getElementById("slipMonth").value;
+  var url;
+  if (v==="nodate") { var now=new Date(); url="/api/slips?year="+now.getFullYear()+"&month="+(now.getMonth()+1)+"&nodate=1"; }
+  else { var parts=v.split("-"); url="/api/slips?year="+parts[0]+"&month="+parts[1]; }
+  api("GET",url).then(function(list) {
+    if (v==="nodate") list = list.filter(function(p){ return !p.transaction_date; });
+    slipsCache = list;
+    if (billsSlipId!==null && !slipsCache.find(function(x){return x.id===billsSlipId;})) {
+      // slip moved out of current filter (e.g. date edit) — fetch all as fallback
+      api("GET","/api/slips").then(function(all){ slipsCache = all; cb(); });
+      return;
+    }
+    cb();
+  });
 }
 
 // ── Edit ──
@@ -342,35 +557,35 @@ function openEdit(id) {
     ["recipient_name","Recipient","text"],["purpose","Purpose","text"],["reference_number","Reference","text"]
   ];
   document.getElementById("editFields").innerHTML = fields.map(function(f) {
-    return '<div class="field"><label>'+f[1]+'</label><input id="ef_'+f[0]+'" type="'+f[2]+'" value="'+((p[f[0]]!==null&&p[f[0]]!==undefined)?String(p[f[0]]).replace(/"/g,"&quot;"):"")+'"></div>';
+    return '<div class="field"><label>'+f[1]+'</label><input id="ef_'+f[0]+'" type="'+f[2]+'" value="'+((p[f[0]]!==null&&p[f[0]]!==undefined)?esc(p[f[0]]):"")+'"></div>';
   }).join("");
-  document.getElementById("modal").classList.add("open");
+  document.getElementById("editModal").classList.add("open");
 }
-function closeModal(){ document.getElementById("modal").classList.remove("open"); editId=null; }
+function closeEdit(){ document.getElementById("editModal").classList.remove("open"); editId=null; }
 function saveEdit() {
   var body = {};
   ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number"].forEach(function(f) {
     var v = document.getElementById("ef_"+f).value;
     body[f] = (f==="amount") ? (v===""?null:Number(v)) : (v===""?null:v);
   });
-  api("PATCH","/api/slips/"+editId, body).then(function(){ toast("✅ Saved"); closeModal(); loadSlips(); });
+  api("PATCH","/api/slips/"+editId, body).then(function(){ toast("✅ Saved"); closeEdit(); loadSlips(); });
 }
 
-// ── Match ──
+// ── Match tab ──
 function loadMatch() {
   api("GET","/api/slips").then(function(list) {
-    var noBill = list.filter(function(p){ return !p.billFile; }).slice().reverse().slice(0,40);
+    var noBill = list.filter(function(p){ return bills(p).length===0; }).slice().reverse().slice(0,40);
     document.getElementById("matchSlips").innerHTML = noBill.length ? noBill.map(function(p) {
       return '<div class="mini'+(selectedSlip===p.id?' selected':'')+'" onclick="pickSlip('+p.id+')">'+
-        '<b>#'+(p.display_id||p.id)+'</b> <span class="amt">฿'+Number(p.amount||0).toLocaleString("th-TH")+'</span><br>'+
-        '<span class="small">'+(p.transaction_date||"no date")+' · '+(p.recipient_name||p.bank_to||"?")+'</span></div>';
+        '<b>#'+esc(p.display_id||p.id)+'</b> <span class="amt">฿'+Number(p.amount||0).toLocaleString("th-TH")+'</span><br>'+
+        '<span class="small">'+(p.transaction_date||"no date")+' · '+esc(p.recipient_name||p.bank_to||"?")+'</span></div>';
     }).join("") : '<div class="empty small">All slips have bills ✅</div>';
   });
   api("GET","/api/inbox").then(function(items) {
-    var bills = items.filter(function(x){ return x.type==="bill"; });
-    document.getElementById("matchBills").innerHTML = bills.length ? bills.map(function(b) {
+    var billsIn = items.filter(function(x){ return x.type==="bill"; });
+    document.getElementById("matchBills").innerHTML = billsIn.length ? billsIn.map(function(b) {
       return '<div class="mini'+(selectedBill===b.id?' selected':'')+'" onclick="pickBill(\''+b.id+'\')">'+
-        '<img src="/bills/'+b.file+'">'+
+        '<img src="/bills/'+esc(b.file)+'">'+
         (b.billAmount!=null?'<span class="amt">฿'+Number(b.billAmount).toLocaleString("th-TH")+'</span>':'<span class="small">amount unknown</span>')+'</div>';
     }).join("") : '<div class="empty small">No bills in inbox<br>Mark inbox items as "Bill" first</div>';
   });
@@ -410,7 +625,7 @@ function uploadFiles(files) {
     var f = arr[i];
     var rowEl = document.createElement("div");
     rowEl.className = "prog-item";
-    rowEl.innerHTML = "<span>"+f.name+"</span><span>⏳ reading...</span>";
+    rowEl.innerHTML = "<span>"+esc(f.name)+"</span><span>⏳ reading...</span>";
     prog.appendChild(rowEl);
     var reader = new FileReader();
     reader.onload = function() {
@@ -436,7 +651,6 @@ function downloadReport() {
 
 // ── Init ──
 if (TOKEN) {
-  // validate token quietly
   fetch("/api/inbox",{headers:{"x-auth":TOKEN}}).then(function(r){
     if (r.ok) showApp(); else showLogin();
   }).catch(showLogin);
