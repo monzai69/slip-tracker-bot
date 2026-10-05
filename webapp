@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>💳 Slip Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--blue:#1565C0;--blue-d:#0D47A1;--green:#1B8A4C;--red:#C62828;--orange:#E65100;--bg:#F0F4FF;--border:#D8E3FF;--text:#1A1A2E;--text2:#667;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Sarabun',sans-serif;background:var(--bg);color:var(--text);padding-bottom:80px;}
+.hidden{display:none!important;}
+/* login */
+#loginView{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;}
+.login-card{background:#fff;border-radius:16px;padding:32px 24px;width:100%;max-width:360px;box-shadow:0 8px 32px rgba(21,101,192,.15);text-align:center;}
+.login-card h1{font-size:22px;margin-bottom:6px;}
+.login-card p{font-size:13px;color:var(--text2);margin-bottom:20px;}
+input,select{width:100%;padding:12px;border:1px solid var(--border);border-radius:10px;font-family:'Sarabun';font-size:15px;}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:12px 18px;border:none;border-radius:10px;font-family:'Sarabun';font-size:14px;font-weight:700;cursor:pointer;transition:.15s;}
+.btn-blue{background:var(--blue);color:#fff;}.btn-blue:active{background:var(--blue-d);}
+.btn-green{background:var(--green);color:#fff;}
+.btn-red{background:#FFEBEE;color:var(--red);}
+.btn-gray{background:#EEF2FA;color:var(--text);}
+.btn-sm{padding:7px 12px;font-size:12px;border-radius:8px;}
+.btn-full{width:100%;margin-top:14px;}
+#loginErr{color:var(--red);font-size:13px;margin-top:10px;min-height:18px;}
+/* header */
+.topbar{position:sticky;top:0;z-index:50;background:var(--blue);color:#fff;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;}
+.topbar b{font-size:16px;}
+/* tabs */
+.tabs{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--border);display:flex;z-index:50;}
+.tab{flex:1;text-align:center;padding:10px 4px 12px;font-size:11px;color:var(--text2);cursor:pointer;}
+.tab .ico{font-size:20px;display:block;margin-bottom:2px;}
+.tab.active{color:var(--blue);font-weight:700;}
+.badge{display:inline-block;min-width:18px;padding:1px 5px;border-radius:10px;background:var(--red);color:#fff;font-size:10px;font-weight:700;}
+/* content */
+.view{padding:16px;max-width:760px;margin:0 auto;}
+.card{background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:12px;}
+.card img.thumb{width:100%;max-height:220px;object-fit:contain;border-radius:8px;background:#F7F9FF;cursor:pointer;}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+.mt{margin-top:10px;}
+.tag{display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:700;}
+.tag-bill{background:#E8F5E9;color:var(--green);}
+.tag-unknown{background:#FFF3E0;color:var(--orange);}
+.tag-slip{background:#E3F2FD;color:var(--blue);}
+.amt{font-weight:700;color:var(--blue);}
+.small{font-size:12px;color:var(--text2);}
+.section-title{font-size:14px;font-weight:700;margin:14px 0 8px;}
+.empty{text-align:center;color:var(--text2);padding:40px 10px;font-size:14px;}
+/* slip list item */
+.slip-item{background:#fff;border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px;}
+.slip-item.selected{border:2px solid var(--blue);background:#F3F8FF;}
+.slip-head{display:flex;justify-content:space-between;align-items:center;gap:8px;}
+.slip-id{font-weight:700;font-size:14px;}
+.pill{font-size:11px;padding:2px 8px;border-radius:10px;}
+.pill-ok{background:#E8F5E9;color:var(--green);}
+.pill-no{background:#FFF3E0;color:var(--orange);}
+/* match layout */
+.match-cols{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.match-col h3{font-size:13px;margin-bottom:8px;text-align:center;}
+.mini{border:1px solid var(--border);border-radius:10px;padding:8px;margin-bottom:8px;background:#fff;cursor:pointer;font-size:12px;}
+.mini.selected{border:2px solid var(--blue);background:#F3F8FF;}
+.mini img{width:100%;height:80px;object-fit:cover;border-radius:6px;margin-bottom:4px;}
+/* toast + modal */
+#toast{position:fixed;bottom:76px;left:50%;transform:translateX(-50%) translateY(100px);background:var(--text);color:#fff;padding:10px 18px;border-radius:10px;font-size:13px;opacity:0;transition:.3s;z-index:100;max-width:90%;text-align:center;}
+#toast.show{transform:translateX(-50%) translateY(0);opacity:1;}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:99;padding:16px;}
+#modal.open{display:flex;}
+.modal-box{background:#fff;border-radius:14px;padding:20px;width:100%;max-width:420px;max-height:85vh;overflow-y:auto;}
+.modal-box h3{font-size:16px;margin-bottom:12px;}
+.field{margin-bottom:10px;}
+.field label{display:block;font-size:11px;color:var(--text2);margin-bottom:3px;font-weight:700;}
+/* progress */
+.prog-item{display:flex;justify-content:space-between;font-size:13px;padding:6px 0;border-bottom:1px solid var(--border);}
+input[type=file]{display:none;}
+.upload-zone{border:2px dashed var(--blue);border-radius:14px;padding:36px 16px;text-align:center;color:var(--blue);background:#F7FAFF;cursor:pointer;font-weight:700;}
+#imgView{position:fixed;inset:0;background:rgba(0,0,0,.9);display:none;align-items:center;justify-content:center;z-index:200;}
+#imgView.open{display:flex;}
+#imgView img{max-width:95%;max-height:92%;object-fit:contain;}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="loginView">
+  <div class="login-card">
+    <h1>💳 Slip Tracker</h1>
+    <p>Enter password to continue</p>
+    <input type="password" id="pw" placeholder="Password" onkeydown="if(event.key==='Enter')login()">
+    <button class="btn btn-blue btn-full" onclick="login()">Login</button>
+    <div id="loginErr"></div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="appView" class="hidden">
+  <div class="topbar">
+    <b>💳 Slip Tracker</b>
+    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);color:#fff" onclick="logout()">Logout</button>
+  </div>
+
+  <!-- INBOX -->
+  <div class="view" id="view-inbox">
+    <div class="section-title">📥 Inbox — unorganized images</div>
+    <div id="inboxList"></div>
+  </div>
+
+  <!-- SLIPS -->
+  <div class="view hidden" id="view-slips">
+    <div class="row">
+      <select id="slipMonth" onchange="loadSlips()" style="flex:1"></select>
+    </div>
+    <div id="slipList" class="mt"></div>
+  </div>
+
+  <!-- MATCH -->
+  <div class="view hidden" id="view-match">
+    <div class="small" style="text-align:center;margin-bottom:10px">Tap a slip, then tap a bill → matched</div>
+    <div class="match-cols">
+      <div class="match-col"><h3>🧾 Slips (no bill)</h3><div id="matchSlips"></div></div>
+      <div class="match-col"><h3>📄 Bills in inbox</h3><div id="matchBills"></div></div>
+    </div>
+  </div>
+
+  <!-- UPLOAD -->
+  <div class="view hidden" id="view-upload">
+    <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
+      📸 Tap to choose images<br><span class="small" style="color:var(--text2)">Slips or bills — many at once is fine.<br>Dates are read from the slip automatically.</span>
+    </div>
+    <input type="file" id="fileInput" accept="image/*" multiple onchange="uploadFiles(this.files)">
+    <div id="uploadProg" class="mt"></div>
+  </div>
+
+  <!-- REPORT -->
+  <div class="view hidden" id="view-report">
+    <div class="card">
+      <div class="section-title" style="margin-top:0">📊 Monthly Excel Report</div>
+      <div class="row">
+        <select id="repYear" style="flex:1"></select>
+        <select id="repMonth" style="flex:1"></select>
+      </div>
+      <button class="btn btn-blue btn-full" onclick="downloadReport()">⬇️ Download Excel</button>
+    </div>
+  </div>
+
+  <!-- TABS -->
+  <div class="tabs">
+    <div class="tab active" data-v="inbox" onclick="switchTab('inbox')"><span class="ico">📥</span>Inbox <span class="badge hidden" id="inboxBadge">0</span></div>
+    <div class="tab" data-v="slips" onclick="switchTab('slips')"><span class="ico">🧾</span>Slips</div>
+    <div class="tab" data-v="match" onclick="switchTab('match')"><span class="ico">🔗</span>Match</div>
+    <div class="tab" data-v="upload" onclick="switchTab('upload')"><span class="ico">📸</span>Upload</div>
+    <div class="tab" data-v="report" onclick="switchTab('report')"><span class="ico">📊</span>Report</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<div id="imgView" onclick="this.classList.remove('open')"><img id="imgViewImg"></div>
+
+<!-- EDIT MODAL -->
+<div id="modal">
+  <div class="modal-box">
+    <h3>✏️ Edit Transaction</h3>
+    <div id="editFields"></div>
+    <div class="row mt">
+      <button class="btn btn-blue" style="flex:1" onclick="saveEdit()">Save</button>
+      <button class="btn btn-gray" style="flex:1" onclick="closeModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var TOKEN = localStorage.getItem("st_token") || "";
+var selectedSlip = null, selectedBill = null, editId = null;
+var slipsCache = [], inboxCache = [];
+
+function api(method, url, body) {
+  return fetch(url, {
+    method: method,
+    headers: Object.assign({ "Content-Type": "application/json", "x-auth": TOKEN }, {}),
+    body: body ? JSON.stringify(body) : undefined
+  }).then(function(r) {
+    if (r.status === 401) { showLogin(); throw new Error("unauthorized"); }
+    return r.json();
+  });
+}
+
+function toast(msg) {
+  var t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(function(){ t.classList.remove("show"); }, 2600);
+}
+
+function viewImg(src) {
+  document.getElementById("imgViewImg").src = src;
+  document.getElementById("imgView").classList.add("open");
+}
+
+// ── Auth ──
+function login() {
+  var pw = document.getElementById("pw").value;
+  fetch("/api/login", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({password: pw}) })
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      if (d.token) { TOKEN = d.token; localStorage.setItem("st_token", TOKEN); showApp(); }
+      else document.getElementById("loginErr").textContent = d.error || "Wrong password";
+    })
+    .catch(function(){ document.getElementById("loginErr").textContent = "Connection error"; });
+}
+function logout() { TOKEN=""; localStorage.removeItem("st_token"); showLogin(); }
+function showLogin() { document.getElementById("loginView").classList.remove("hidden"); document.getElementById("appView").classList.add("hidden"); }
+function showApp() {
+  document.getElementById("loginView").classList.add("hidden");
+  document.getElementById("appView").classList.remove("hidden");
+  initMonthPickers();
+  loadInbox(); loadSlips(); loadMatch();
+}
+
+// ── Tabs ──
+function switchTab(v) {
+  document.querySelectorAll(".view").forEach(function(el){ el.classList.add("hidden"); });
+  document.getElementById("view-"+v).classList.remove("hidden");
+  document.querySelectorAll(".tab").forEach(function(el){ el.classList.toggle("active", el.getAttribute("data-v")===v); });
+  if (v==="inbox") loadInbox();
+  if (v==="slips") loadSlips();
+  if (v==="match") loadMatch();
+}
+
+// ── Inbox ──
+function loadInbox() {
+  api("GET","/api/inbox").then(function(items) {
+    inboxCache = items;
+    var badge = document.getElementById("inboxBadge");
+    badge.textContent = items.length;
+    badge.classList.toggle("hidden", items.length===0);
+    var el = document.getElementById("inboxList");
+    if (!items.length) { el.innerHTML = '<div class="empty">📭 Inbox empty — all organized!</div>'; return; }
+    el.innerHTML = items.map(function(it) {
+      var tag = it.type==="bill" ? '<span class="tag tag-bill">BILL'+(it.billAmount!=null?' ฿'+Number(it.billAmount).toLocaleString("th-TH"):'')+'</span>' : '<span class="tag tag-unknown">UNKNOWN</span>';
+      return '<div class="card">'+
+        '<img class="thumb" src="/bills/'+it.file+'" onclick="viewImg(this.src)">'+
+        '<div class="row mt">'+tag+'<span class="small">'+new Date(it.uploadedAt).toLocaleString("th-TH")+' · '+(it.source||"")+'</span></div>'+
+        '<div class="row mt">'+
+          '<button class="btn btn-blue btn-sm" onclick="asSlip(\''+it.id+'\')">🧾 It\'s a Slip</button>'+
+          '<button class="btn btn-green btn-sm" onclick="asBill(\''+it.id+'\')">📄 It\'s a Bill</button>'+
+          '<button class="btn btn-red btn-sm" onclick="delInbox(\''+it.id+'\')">🗑 Delete</button>'+
+        '</div></div>';
+    }).join("");
+  });
+}
+function asSlip(id) {
+  toast("🔍 Reading slip...");
+  api("POST","/api/inbox/"+id+"/as-slip").then(function(d) {
+    if (d.record) { toast("✅ Slip #"+(d.record.display_id||d.record.id)+" created"); loadInbox(); loadSlips(); }
+    else toast("❌ "+(d.error||"Could not read as slip"));
+  });
+}
+function asBill(id) {
+  api("POST","/api/inbox/"+id+"/as-bill").then(function(d) {
+    if (d.item) { toast("📄 Marked as bill"+(d.item.billAmount!=null?" ฿"+Number(d.item.billAmount).toLocaleString("th-TH"):"")); loadInbox(); loadMatch(); }
+    else toast("❌ "+(d.error||"error"));
+  });
+}
+function delInbox(id) {
+  if (!confirm("Delete this image?")) return;
+  api("DELETE","/api/inbox/"+id).then(function(){ toast("🗑 Deleted"); loadInbox(); loadMatch(); });
+}
+
+// ── Slips ──
+function initMonthPickers() {
+  var now = new Date();
+  var sel = document.getElementById("slipMonth");
+  sel.innerHTML = "";
+  for (var i=0;i<14;i++) {
+    var d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    var val = d.getFullYear()+"-"+(d.getMonth()+1);
+    var opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = d.toLocaleDateString("en-US",{month:"long",year:"numeric"});
+    sel.appendChild(opt);
+  }
+  var noDate = document.createElement("option");
+  noDate.value = "nodate"; noDate.textContent = "⚠️ No date (fix these)";
+  sel.appendChild(noDate);
+  // report pickers
+  var ry = document.getElementById("repYear"), rm = document.getElementById("repMonth");
+  ry.innerHTML=""; rm.innerHTML="";
+  for (var y=now.getFullYear(); y>=now.getFullYear()-2; y--) { var o=document.createElement("option"); o.value=y; o.textContent=y; ry.appendChild(o); }
+  var mn=["January","February","March","April","May","June","July","August","September","October","November","December"];
+  mn.forEach(function(m,i){ var o=document.createElement("option"); o.value=i+1; o.textContent=m; rm.appendChild(o); });
+  rm.value = now.getMonth()+1;
+}
+function loadSlips() {
+  var v = document.getElementById("slipMonth").value;
+  var url;
+  if (v==="nodate") {
+    var now = new Date();
+    url = "/api/slips?year="+now.getFullYear()+"&month="+(now.getMonth()+1)+"&nodate=1";
+  } else {
+    var parts = v.split("-");
+    url = "/api/slips?year="+parts[0]+"&month="+parts[1];
+  }
+  api("GET",url).then(function(list) {
+    if (v==="nodate") list = list.filter(function(p){ return !p.transaction_date; });
+    slipsCache = list;
+    var el = document.getElementById("slipList");
+    if (!list.length) { el.innerHTML = '<div class="empty">No transactions in this month</div>'; return; }
+    el.innerHTML = list.slice().reverse().map(function(p) {
+      var billPill = p.billFile ? '<span class="pill pill-ok">📎 bill ✅</span>' : '<span class="pill pill-no">⚠️ no bill</span>';
+      return '<div class="slip-item">'+
+        '<div class="slip-head"><span class="slip-id">#'+(p.display_id||p.id)+'</span><span class="amt">฿'+Number(p.amount||0).toLocaleString("th-TH",{minimumFractionDigits:2})+'</span></div>'+
+        '<div class="small mt">'+(p.transaction_date||"⚠️ no date")+' '+(p.transaction_time||"")+' · '+(p.bank_from||"?")+' ****'+(p.account_from||"????")+' → '+(p.recipient_name||p.bank_to||"?")+'</div>'+
+        '<div class="small">'+(p.purpose||"-")+'</div>'+
+        '<div class="row mt">'+billPill+
+          (p.imageFile?'<button class="btn btn-gray btn-sm" onclick="viewImg(\'/slips/'+p.imageFile+'\')">🧾 Slip</button>':'')+
+          (p.billFile?'<button class="btn btn-gray btn-sm" onclick="viewImg(\'/bills/'+p.billFile+'\')">📄 Bill</button>':'')+
+          (p.billFile?'<button class="btn btn-red btn-sm" onclick="unmatch('+p.id+')">✂️ Unmatch</button>':'')+
+          '<button class="btn btn-blue btn-sm" onclick="openEdit('+p.id+')">✏️ Edit</button>'+
+          '<button class="btn btn-red btn-sm" onclick="delSlip('+p.id+')">🗑</button>'+
+        '</div></div>';
+    }).join("");
+  });
+}
+function delSlip(id) {
+  if (!confirm("Delete this transaction completely?")) return;
+  api("DELETE","/api/slips/"+id).then(function(){ toast("🗑 Deleted"); loadSlips(); loadMatch(); });
+}
+function unmatch(id) {
+  if (!confirm("Detach bill from this slip? Bill goes back to inbox.")) return;
+  api("POST","/api/unmatch",{slipId:id}).then(function(){ toast("✂️ Unmatched"); loadSlips(); loadInbox(); loadMatch(); });
+}
+
+// ── Edit ──
+function openEdit(id) {
+  var p = slipsCache.find(function(x){ return x.id===id; });
+  if (!p) return;
+  editId = id;
+  var fields = [
+    ["amount","Amount (฿)","number"],["transaction_date","Date (YYYY-MM-DD)","text"],["transaction_time","Time (HH:MM)","text"],
+    ["bank_from","From Bank","text"],["account_from","From Acct (last 4)","text"],
+    ["bank_to","To Bank","text"],["account_to","To Acct (last 4)","text"],
+    ["recipient_name","Recipient","text"],["purpose","Purpose","text"],["reference_number","Reference","text"]
+  ];
+  document.getElementById("editFields").innerHTML = fields.map(function(f) {
+    return '<div class="field"><label>'+f[1]+'</label><input id="ef_'+f[0]+'" type="'+f[2]+'" value="'+((p[f[0]]!==null&&p[f[0]]!==undefined)?String(p[f[0]]).replace(/"/g,"&quot;"):"")+'"></div>';
+  }).join("");
+  document.getElementById("modal").classList.add("open");
+}
+function closeModal(){ document.getElementById("modal").classList.remove("open"); editId=null; }
+function saveEdit() {
+  var body = {};
+  ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number"].forEach(function(f) {
+    var v = document.getElementById("ef_"+f).value;
+    body[f] = (f==="amount") ? (v===""?null:Number(v)) : (v===""?null:v);
+  });
+  api("PATCH","/api/slips/"+editId, body).then(function(){ toast("✅ Saved"); closeModal(); loadSlips(); });
+}
+
+// ── Match ──
+function loadMatch() {
+  api("GET","/api/slips").then(function(list) {
+    var noBill = list.filter(function(p){ return !p.billFile; }).slice().reverse().slice(0,40);
+    document.getElementById("matchSlips").innerHTML = noBill.length ? noBill.map(function(p) {
+      return '<div class="mini'+(selectedSlip===p.id?' selected':'')+'" onclick="pickSlip('+p.id+')">'+
+        '<b>#'+(p.display_id||p.id)+'</b> <span class="amt">฿'+Number(p.amount||0).toLocaleString("th-TH")+'</span><br>'+
+        '<span class="small">'+(p.transaction_date||"no date")+' · '+(p.recipient_name||p.bank_to||"?")+'</span></div>';
+    }).join("") : '<div class="empty small">All slips have bills ✅</div>';
+  });
+  api("GET","/api/inbox").then(function(items) {
+    var bills = items.filter(function(x){ return x.type==="bill"; });
+    document.getElementById("matchBills").innerHTML = bills.length ? bills.map(function(b) {
+      return '<div class="mini'+(selectedBill===b.id?' selected':'')+'" onclick="pickBill(\''+b.id+'\')">'+
+        '<img src="/bills/'+b.file+'">'+
+        (b.billAmount!=null?'<span class="amt">฿'+Number(b.billAmount).toLocaleString("th-TH")+'</span>':'<span class="small">amount unknown</span>')+'</div>';
+    }).join("") : '<div class="empty small">No bills in inbox<br>Mark inbox items as "Bill" first</div>';
+  });
+}
+function pickSlip(id) { selectedSlip = (selectedSlip===id)?null:id; tryMatch(); loadMatch(); }
+function pickBill(id) { selectedBill = (selectedBill===id)?null:id; tryMatch(); loadMatch(); }
+function tryMatch() {
+  if (selectedSlip===null || selectedBill===null) return;
+  var s = selectedSlip, b = selectedBill;
+  api("POST","/api/match",{slipId:s, inboxId:b}).then(function(d) {
+    if (d.warning) {
+      var ok = confirm("⚠️ Amounts don't match!\nSlip: ฿"+Number(d.slipAmount).toLocaleString("th-TH")+"\nBill: ฿"+Number(d.billAmount).toLocaleString("th-TH")+"\n\nMatch anyway?");
+      if (ok) {
+        api("POST","/api/match",{slipId:s, inboxId:b, force:true}).then(function(d2) {
+          if (d2.matched) toast("✅ Matched (forced)");
+          selectedSlip=null; selectedBill=null; loadMatch(); loadInbox(); loadSlips();
+        });
+      } else { selectedSlip=null; selectedBill=null; loadMatch(); }
+      return;
+    }
+    if (d.matched) toast("✅ Matched #"+(d.record.display_id||d.record.id));
+    else toast("❌ "+(d.error||"error"));
+    selectedSlip=null; selectedBill=null;
+    loadMatch(); loadInbox(); loadSlips();
+  });
+}
+
+// ── Upload ──
+function uploadFiles(files) {
+  if (!files || !files.length) return;
+  var prog = document.getElementById("uploadProg");
+  prog.innerHTML = "";
+  var arr = Array.from(files);
+  var i = 0;
+  function next() {
+    if (i >= arr.length) { toast("🎉 All uploads done"); loadInbox(); loadSlips(); loadMatch(); return; }
+    var f = arr[i];
+    var rowEl = document.createElement("div");
+    rowEl.className = "prog-item";
+    rowEl.innerHTML = "<span>"+f.name+"</span><span>⏳ reading...</span>";
+    prog.appendChild(rowEl);
+    var reader = new FileReader();
+    reader.onload = function() {
+      api("POST","/api/upload",{imageBase64: reader.result}).then(function(d) {
+        if (d.result==="slip") rowEl.children[1].innerHTML = "✅ Slip #"+(d.record.display_id||d.record.id)+" ฿"+Number(d.record.amount||0).toLocaleString("th-TH");
+        else if (d.result==="inbox") rowEl.children[1].innerHTML = "📥 Inbox ("+d.item.type+(d.item.billAmount!=null?" ฿"+Number(d.item.billAmount).toLocaleString("th-TH"):"")+")";
+        else rowEl.children[1].textContent = "❌ "+(d.error||"error");
+        i++; next();
+      }).catch(function(){ rowEl.children[1].textContent = "❌ failed"; i++; next(); });
+    };
+    reader.readAsDataURL(f);
+  }
+  next();
+  document.getElementById("fileInput").value = "";
+}
+
+// ── Report ──
+function downloadReport() {
+  var y = document.getElementById("repYear").value;
+  var m = document.getElementById("repMonth").value;
+  window.location.href = "/api/report?year="+y+"&month="+m;
+}
+
+// ── Init ──
+if (TOKEN) {
+  // validate token quietly
+  fetch("/api/inbox",{headers:{"x-auth":TOKEN}}).then(function(r){
+    if (r.ok) showApp(); else showLogin();
+  }).catch(showLogin);
+} else showLogin();
+</script>
+</body>
+</html>
