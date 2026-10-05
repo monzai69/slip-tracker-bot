@@ -83,6 +83,17 @@ function getLastSlip(uid) {
   return s;
 }
 
+// ── Detect the REAL image format (JPEG / PNG / GIF / WEBP) from the file bytes ──
+function sniffMediaType(b64) {
+  try {
+    var h = Buffer.from(String(b64).slice(0, 64), "base64");
+    if (h[0] === 0x89 && h[1] === 0x50 && h[2] === 0x4E && h[3] === 0x47) return "image/png";
+    if (h[0] === 0x47 && h[1] === 0x49 && h[2] === 0x46) return "image/gif";
+    if (h[0] === 0x52 && h[1] === 0x49 && h[2] === 0x46 && h[3] === 0x46 && h[8] === 0x57 && h[9] === 0x45 && h[10] === 0x42 && h[11] === 0x50) return "image/webp";
+  } catch (e) {}
+  return "image/jpeg";
+}
+
 // ── Claude: detect image type ──────────────────────────────────────────────
 async function detectImageType(imageBase64) {
   try {
@@ -94,7 +105,7 @@ async function detectImageType(imageBase64) {
         messages: [{
           role: "user",
           content: [
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: imageBase64 } },
+            { type: "image", source: { type: "base64", media_type: sniffMediaType(imageBase64), data: imageBase64 } },
             { type: "text", text: "Look at this image carefully and decide if it is a bank transfer confirmation slip or a bill/invoice.\n\nIt is a SLIP if it shows ANY of these:\n- 'Transfer Completed' or 'Transfer Successful'\n- 'โอนเงินสำเร็จ' or 'รายการสำเร็จ'\n- 'Transaction No' or 'Reference No' or 'เลขที่รายการ'\n- Sender account AND receiver account with bank names\n- FROM and TO with account numbers\n- Banks: SCB, KBank, KBIZ, GSB, Krungthai, Bangkok Bank, Krungsri, TMB, TTB, PromptPay\n\nIt is a BILL if it shows ANY of these:\n- QR code for payment (even if it shows an amount or bank account number)\n- Invoice or receipt with list of products/services\n- 'Please pay' or 'Amount due' or 'ยอดที่ต้องชำระ'\n- Bill with company name and itemized costs\n- Bank account number for receiving payment (but NO transfer confirmation)\n\nKEY RULE: A QR code or bank account number shown on a bill is NOT a slip. A slip must show transfer confirmation that money has already been sent.\n\nReturn ONLY one word: SLIP, BILL, or UNKNOWN" }
           ]
         }]
@@ -107,7 +118,7 @@ async function detectImageType(imageBase64) {
     if (result.indexOf("BILL") !== -1) return "BILL";
     return "UNKNOWN";
   } catch (e) {
-    console.error("Detect error:", e.message);
+    console.error("Detect error:", e.message, e.response ? JSON.stringify(e.response.data) : "");
     return "UNKNOWN";
   }
 }
@@ -123,7 +134,7 @@ async function readSlip(imageBase64, caption) {
         messages: [{
           role: "user",
           content: [
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: imageBase64 } },
+            { type: "image", source: { type: "base64", media_type: sniffMediaType(imageBase64), data: imageBase64 } },
             { type: "text", text: "You are an expert Thai bank payment slip reader. Extract ALL details carefully.\n\nThai date formats:\n- DD/MM/YYYY or DD/MM/YY\n- DD MMM YYYY (e.g. 08 พ.ค. 2568)\n- Buddhist year (พ.ศ.) subtract 543 to get AD. 2568=2025, 2569=2026\n- Time: HH:MM or HH:MM:SS\n\nBanks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay.\nUser note: \"" + (caption || "") + "\"\n\nReturn ONLY valid JSON:\n{\n  \"bank_from\": \"bank name or null\",\n  \"account_from\": \"last 4 digits or null\",\n  \"bank_to\": \"bank name or null\",\n  \"account_to\": \"last 4 digits or null\",\n  \"recipient_name\": \"name or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD or null\",\n  \"transaction_time\": \"HH:MM or null\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else infer from recipient\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}" }
           ]
         }]
@@ -150,7 +161,7 @@ async function readBillAmount(imageBase64) {
         messages: [{
           role: "user",
           content: [
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: imageBase64 } },
+            { type: "image", source: { type: "base64", media_type: sniffMediaType(imageBase64), data: imageBase64 } },
             { type: "text", text: "Look at this bill or invoice image. Find the TOTAL amount to pay.\nReturn ONLY a JSON object, nothing else:\n{\"amount\": 0.00}\nAmount must be a number. No commas. If you cannot find an amount return {\"amount\": null}" }
           ]
         }]
@@ -161,7 +172,7 @@ async function readBillAmount(imageBase64) {
     const parsed = JSON.parse(raw.replace(/```json/g,"").replace(/```/g,"").trim());
     return (parsed.amount === 0 || parsed.amount) ? parsed.amount : null;
   } catch (e) {
-    console.error("Bill amount error:", e.message);
+    console.error("Bill amount error:", e.message, e.response ? JSON.stringify(e.response.data) : "");
     return null;
   }
 }
