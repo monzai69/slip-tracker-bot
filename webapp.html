@@ -456,9 +456,10 @@ function loadSlips() {
     if (!list.length) { el.innerHTML = '<div class="empty">No transactions in this month</div>'; return; }
     el.innerHTML = list.slice().reverse().map(function(p) {
       var bl = bills(p);
-      var billBtn = bl.length
-        ? '<button class="btn btn-green btn-sm" onclick="openBills('+p.id+')">📄 Bills ('+bl.length+')</button>'
-        : '<button class="btn btn-orange btn-sm" onclick="openBills('+p.id+')">＋ Add bill</button>';
+      var billBtn;
+      if (bl.length) billBtn = '<button class="btn btn-green btn-sm" onclick="openBills('+p.id+')">📄 Bills ('+bl.length+')</button>';
+      else if (p.no_bill_expected) billBtn = '<button class="btn btn-gray btn-sm" onclick="unmarkNoBill('+p.id+')">➖ No bill expected</button>';
+      else billBtn = '<button class="btn btn-orange btn-sm" onclick="openBills('+p.id+')">＋ Add bill</button>';
       return '<div class="slip-item">'+
         '<div class="slip-head"><span class="slip-id">#'+esc(p.display_id||p.id)+'</span><span class="amt">฿'+Number(p.amount||0).toLocaleString("th-TH",{minimumFractionDigits:2})+'</span></div>'+
         '<div class="small mt">'+(p.transaction_date||"⚠️ no date")+' '+(p.transaction_time||"")+' · '+esc(p.bank_from||"?")+' ****'+esc(p.account_from||"????")+' → '+esc(p.recipient_name||p.bank_to||"?")+'</div>'+
@@ -517,9 +518,10 @@ function renderBillsModal() {
     document.getElementById("bmInboxList").innerHTML = billsIn.map(function(b) {
       var sameAmt = (b.billAmount!=null && slipAmt!=null && Math.abs(b.billAmount-slipAmt)<=1);
       return '<div class="mini" onclick="pickInboxBill(\''+b.id+'\')" style="display:flex;gap:8px;align-items:center">'+
-        '<img src="/bills/'+esc(b.file)+'" style="width:56px;height:56px;margin:0;flex:none;object-fit:contain" onclick="event.stopPropagation();viewImg(this.src)">'+
-        '<div>'+(b.billAmount!=null?('<span class="amt">฿'+Number(b.billAmount).toLocaleString("th-TH")+'</span>'):'<span class="small">amount unknown</span>')+
-        (sameAmt?' <span class="tag tag-bill">same amount ✅</span>':'')+'</div></div>';
+        '<img src="/bills/'+esc(b.file)+'" style="width:56px;height:56px;margin:0;flex:none;object-fit:contain">'+
+        '<div style="flex:1">'+(b.billAmount!=null?('<span class="amt">฿'+Number(b.billAmount).toLocaleString("th-TH")+'</span>'):'<span class="small">amount unknown</span>')+
+        (sameAmt?' <span class="tag tag-bill">same amount ✅</span>':'')+'</div>'+
+        '<button class="btn btn-gray btn-sm" style="padding:3px 8px;flex:none" onclick="event.stopPropagation();viewImg(\'/bills/'+esc(b.file)+'\')">🔍</button></div>';
     }).join("");
   });
 }
@@ -642,7 +644,7 @@ function loadMatch() {
   var slipSort = (document.getElementById("mSlipSort")||{}).value || "tx_desc";
   var billSort = (document.getElementById("mBillSort")||{}).value || "up_desc";
   api("GET","/api/slips").then(function(list) {
-    var noBill = list.filter(function(p){ return bills(p).length===0; });
+    var noBill = list.filter(function(p){ return bills(p).length===0 && !p.no_bill_expected; });
     if (monthV==="nodate") {
       noBill = noBill.filter(function(p){ return !p.transaction_date; });
     } else if (monthV!=="all") {
@@ -652,8 +654,9 @@ function loadMatch() {
     noBill.sort(slipComparator(slipSort));
     document.getElementById("matchSlips").innerHTML = noBill.length ? noBill.map(function(p) {
       var zoom = p.imageFile ? '<button class="btn btn-gray btn-sm" style="padding:3px 8px;flex:none" onclick="event.stopPropagation();viewImg(\'/slips/'+esc(p.imageFile)+'\')">🔍</button>' : '';
+      zoom += '<button class="btn btn-gray btn-sm" style="padding:3px 8px;flex:none" title="No bill expected" onclick="event.stopPropagation();markNoBill('+p.id+')">🚫</button>';
       return '<div class="mini'+(selectedSlip===p.id?' selected':'')+'" onclick="pickSlip('+p.id+')">'+
-        '<div style="display:flex;justify-content:space-between;align-items:center;gap:4px"><span><b>#'+esc(p.display_id||p.id)+'</b> <span class="amt">฿'+Number(p.amount||0).toLocaleString("th-TH")+'</span></span>'+zoom+'</div>'+
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:4px"><span><b>#'+esc(p.display_id||p.id)+'</b> <span class="amt">฿'+Number(p.amount||0).toLocaleString("th-TH")+'</span></span><span style="display:flex;gap:4px;flex:none">'+zoom+'</span></div>'+
         '<span class="small">'+(p.transaction_date||"no date")+' · '+esc(p.recipient_name||p.bank_to||"?")+'</span></div>';
     }).join("") : '<div class="empty small">No unmatched slips here ✅</div>';
   });
@@ -662,12 +665,29 @@ function loadMatch() {
     billsIn.sort(billComparator(billSort));
     document.getElementById("matchBills").innerHTML = billsIn.length ? billsIn.map(function(b) {
       return '<div class="mini'+(selectedBill===b.id?' selected':'')+'" onclick="pickBill(\''+b.id+'\')">'+
-        '<img src="/bills/'+esc(b.file)+'" onclick="event.stopPropagation();viewImg(this.src)">'+
-        (b.billAmount!=null?'<span class="amt">฿'+Number(b.billAmount).toLocaleString("th-TH")+'</span>':'<span class="small">⚠️ amount unknown — tap picture</span>')+'</div>';
+        '<img src="/bills/'+esc(b.file)+'">'+
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:4px">'+
+        (b.billAmount!=null?'<span class="amt">฿'+Number(b.billAmount).toLocaleString("th-TH")+'</span>':'<span class="small">⚠️ amount unknown</span>')+
+        '<button class="btn btn-gray btn-sm" style="padding:3px 8px;flex:none" onclick="event.stopPropagation();viewImg(\'/bills/'+esc(b.file)+'\')">🔍</button>'+
+        '</div></div>';
     }).join("") : '<div class="empty small">No bills in inbox<br>Mark inbox items as "Bill" first</div>';
   });
 }
 function pickSlip(id) { selectedSlip = (selectedSlip===id)?null:id; tryMatch(); loadMatch(); }
+function markNoBill(id) {
+  if (!confirm("Mark this slip as 'no bill expected'?\n\nIt disappears from the Match page. You can undo on the Slips tab (gray ➖ tag).")) return;
+  api("POST","/api/slips/"+id+"/no-bill",{expected:true}).then(function(d) {
+    if (d.ok) { toast("🚫 Marked — removed from Match"); if (selectedSlip===id) selectedSlip=null; loadMatch(); loadSlips(); }
+    else toast("❌ "+(d.error||"error"));
+  });
+}
+function unmarkNoBill(id) {
+  if (!confirm("Remove the 'no bill expected' mark?\nThis slip returns to the Match page.")) return;
+  api("POST","/api/slips/"+id+"/no-bill",{expected:false}).then(function(d) {
+    if (d.ok) { toast("↩️ Back in Match list"); loadSlips(); loadMatch(); }
+    else toast("❌ "+(d.error||"error"));
+  });
+}
 function pickBill(id) { selectedBill = (selectedBill===id)?null:id; tryMatch(); loadMatch(); }
 function tryMatch() {
   if (selectedSlip===null || selectedBill===null) return;
