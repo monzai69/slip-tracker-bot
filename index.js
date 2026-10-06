@@ -278,8 +278,23 @@ function styleHdr(row, color) {
   });
   row.height = 22;
 }
+function normalizeBank(b) {
+  var s = (b || "Unknown").trim();
+  var l = s.toLowerCase();
+  if (/kasikorn|kbank|kbiz/.test(l)) return "KBank";
+  if (/government\s*savings|gsb|ออมสิน/.test(l)) return "GSB";
+  if (/ayudhya|krungsri|(^|[^a-z])bay([^a-z]|$)/.test(l)) return "Krungsri";
+  if (/krung\s*thai|ktb/.test(l)) return "Krungthai";
+  if (/bangkok\s*bank|bbl/.test(l)) return "Bangkok Bank";
+  if (/siam\s*commercial|scb/.test(l)) return "SCB";
+  if (/tmb|ttb|thanachart/.test(l)) return "TTB";
+  if (/baac|เพื่อการเกษตร/.test(l)) return "BAAC";
+  if (/prompt\s*pay|พร้อมเพย์/.test(l)) return "PromptPay";
+  if (/uob/.test(l)) return "UOB";
+  return s;
+}
 function getBankColor(bank) {
-  var map = { "SCB":"FF4E2E8C","Kasikorn":"FF1A8C2E","KBank":"FF1A8C2E","Krungthai":"FF009FDA","KTB":"FF009FDA","Bangkok":"FF0050A0","BBL":"FF0050A0","Krungsri":"FFD4A017","BAY":"FFD4A017","GSB":"FF8B0000","TMB":"FF0056A6","PromptPay":"FF2D7DD2" };
+  var map = { "SCB":"FF4E2E8C","Kasikorn":"FF1A8C2E","KBank":"FF1A8C2E","Krungthai":"FF009FDA","KTB":"FF009FDA","Bangkok":"FF0050A0","BBL":"FF0050A0","Krungsri":"FFD4A017","BAY":"FFD4A017","GSB":"FF8B0000","TMB":"FF0056A6","TTB":"FF0056A6","BAAC":"FF0B7A3B","UOB":"FF003087","PromptPay":"FF2D7DD2" };
   var found = Object.keys(map).find(function(k) { return (bank||"").toLowerCase().indexOf(k.toLowerCase()) !== -1; });
   return found ? map[found] : "FF1565C0";
 }
@@ -306,7 +321,7 @@ async function makeReport(year, month) {
   s1.getRow(1).height = 30;
   styleHdr(s1.addRow(["#","Date","Time","Amount (฿)","From Bank","Acct","To Bank","Acct","Recipient","Purpose","Ref","Type","Evidence"]), "FF0D47A1");
   rows.forEach(function(p, i) {
-    var row = s1.addRow([showId(p),p.transaction_date||"",p.transaction_time||"",Number(p.amount)||0,p.bank_from||"",p.account_from||"",p.bank_to||"",p.account_to||"",p.recipient_name||"",p.purpose||"",p.reference_number||"",(p.slip_type||"").replace(/_/g," "),(getBillFiles(p).length?("✅ "+getBillFiles(p).length):"⚠️")]);
+    var row = s1.addRow([showId(p),p.transaction_date||"",p.transaction_time||"",Number(p.amount)||0,p.bank_from||"",p.account_from||"",p.bank_to||"",p.account_to||"",p.recipient_name||"",p.purpose||"",p.reference_number||"",(p.slip_type||"").replace(/_/g," "),(getBillFiles(p).length?("✅ "+getBillFiles(p).length):(p.no_bill_expected?"➖":"⚠️"))]);
     if (i%2===0) row.eachCell(function(c){c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFF3F8FF"}};});
     row.getCell(4).numFmt="#,##0.00"; row.getCell(4).font={bold:true,color:{argb:"FF1565C0"}}; row.height=20;
   });
@@ -323,7 +338,7 @@ async function makeReport(year, month) {
   s2.addRow([]);
   styleHdr(s2.addRow(["Bank Account","Transactions","Total (฿)","% of Total"]),"FF0D47A1");
   var acctMap={};
-  rows.forEach(function(p){var k=(p.bank_from||"Unknown")+" ****"+(p.account_from||"????"); if(!acctMap[k])acctMap[k]={count:0,sum:0}; acctMap[k].count++; acctMap[k].sum+=Number(p.amount)||0;});
+  rows.forEach(function(p){var k=normalizeBank(p.bank_from)+" ****"+(p.account_from||"????"); if(!acctMap[k])acctMap[k]={count:0,sum:0}; acctMap[k].count++; acctMap[k].sum+=Number(p.amount)||0;});
   Object.entries(acctMap).sort(function(a,b){return b[1].sum-a[1].sum;}).forEach(function(e,i){
     var pct=grandTotal>0?(e[1].sum/grandTotal*100).toFixed(1)+"%":"0%";
     var row=s2.addRow([e[0],e[1].count,e[1].sum,pct]);
@@ -346,8 +361,9 @@ async function makeReport(year, month) {
 
   var accountGroups={};
   rows.forEach(function(p){
-    var key=(p.bank_from||"Unknown").replace(/kasikorn|kbank/gi,"KBank")+"_"+(p.account_from||"????");
-    if(!accountGroups[key])accountGroups[key]={bank:p.bank_from||"Unknown",acct:p.account_from||"????",payments:[]};
+    var nb=normalizeBank(p.bank_from);
+    var key=nb+"_"+(p.account_from||"????");
+    if(!accountGroups[key])accountGroups[key]={bank:nb,acct:p.account_from||"????",payments:[]};
     accountGroups[key].payments.push(p);
   });
 
@@ -356,7 +372,7 @@ async function makeReport(year, month) {
     var grp=accountGroups[accountKeys[ai]];
     var acctTotal=grp.payments.reduce(function(s,p){return s+(Number(p.amount)||0);},0);
     var color=getBankColor(grp.bank);
-    var sheetName=(grp.bank.replace(/kasikorn|kbank/gi,"KBank")+" ("+grp.acct+")").replace(/[*?:\\/\[\]]/g,"-").substring(0,31);
+    var sheetName=(grp.bank+" ("+grp.acct+")").replace(/[*?:\\/\[\]]/g,"-").substring(0,31);
     var sa=wb.addWorksheet(sheetName);
     sa.mergeCells("A1:F1");
     var ta=sa.getCell("A1"); ta.value=grp.bank+" (****"+grp.acct+") — "+label;
@@ -408,8 +424,13 @@ async function makeReport(year, month) {
           cell.value={text:"🔗 View Bill"+(maxBills>1?(" "+(bi+1)):""),hyperlink:baseUrl+"/bills/"+bills[bi]};
           cell.font={color:{argb:"FF2E7D32"},underline:true,bold:true};
         } else if(bi===0){
-          cell.value="⚠️ No bill";
-          cell.font={italic:true,color:{argb:"FFBF360C"}};
+          if(p.no_bill_expected){
+            cell.value="➖ No bill expected";
+            cell.font={italic:true,color:{argb:"FF9E9E9E"}};
+          } else {
+            cell.value="⚠️ No bill";
+            cell.font={italic:true,color:{argb:"FFBF360C"}};
+          }
         }
       }
       for(var ci=1;ci<=5+maxBills;ci++){
@@ -495,7 +516,7 @@ async function handleEvent(event) {
       var total = thisMonth.reduce(function(s,p) { return s+(Number(p.amount)||0); }, 0);
       var withBill = thisMonth.filter(function(p) { return getBillFiles(p).length > 0; }).length;
       var inboxCount = loadInbox().length;
-      var aMap = {}; thisMonth.forEach(function(p) { var k=(p.bank_from||"Unknown")+" ****"+(p.account_from||"????"); aMap[k]=(aMap[k]||0)+(Number(p.amount)||0); });
+      var aMap = {}; thisMonth.forEach(function(p) { var k=normalizeBank(p.bank_from)+" ****"+(p.account_from||"????"); aMap[k]=(aMap[k]||0)+(Number(p.amount)||0); });
       var aLines = Object.entries(aMap).map(function(e) { return "  • "+e[0]+": ฿"+e[1].toLocaleString("th-TH",{minimumFractionDigits:2}); }).join("\n");
       return client.replyMessage(event.replyToken, { type: "text", text: ["📊 "+format(now,"MMMM yyyy")+" Summary","━━━━━━━━━━━━━━━━━━","📋 Transactions: "+thisMonth.length,"💰 Total: ฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2}),"📎 With bill: "+withBill+"/"+thisMonth.length,"📥 Inbox (unorganized): "+inboxCount,"","By Account:",aLines||"  (none yet)","","Organize: "+BASE_URL+"/app"].join("\n") });
     }
@@ -519,7 +540,7 @@ async function handleEvent(event) {
         var filtered = list.filter(function(p) { if (!p.transaction_date) return false; var d = parseISO(p.transaction_date); return d.getFullYear() === year && d.getMonth()+1 === month; });
         var total = filtered.reduce(function(s,p){return s+(Number(p.amount)||0);},0);
         var withBill = filtered.filter(function(p){return getBillFiles(p).length > 0;}).length;
-        var accts = {}; filtered.forEach(function(p){accts[(p.bank_from||"?")+" ****"+(p.account_from||"????")] = true;});
+        var accts = {}; filtered.forEach(function(p){accts[normalizeBank(p.bank_from)+" ****"+(p.account_from||"????")] = true;});
         return client.pushMessage(gid, { type: "text", text: ["✅ Report ready — "+format(new Date(year,month-1),"MMMM yyyy"),"📋 "+filtered.length+" transactions","💰 ฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2}),"🏦 "+Object.keys(accts).length+" account sheet(s)","📎 Bill evidence: "+withBill+"/"+filtered.length,"","⬇️ Download Excel:",BASE_URL+"/api/report?year="+year+"&month="+month].join("\n") });
       } catch(err) {
         console.error("Report error:", err.message);
@@ -653,6 +674,7 @@ app.post("/api/match", auth, function(req, res) {
   var bills = getBillFiles(list[pIdx]);
   bills.push(inbox[iIdx].file);
   setBillFiles(list[pIdx], bills);
+  list[pIdx].no_bill_expected = false;
   savePayments(list);
   inbox.splice(iIdx, 1);
   saveInbox(inbox);
@@ -703,9 +725,20 @@ app.post("/api/slips/:id/bill-upload", auth, function(req, res) {
     var bills = getBillFiles(list[idx]);
     bills.push(fname);
     setBillFiles(list[idx], bills);
+    list[idx].no_bill_expected = false;
     savePayments(list);
     res.json({ ok: true, record: list[idx] });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Mark / unmark a slip as "no bill expected"
+app.post("/api/slips/:id/no-bill", auth, function(req, res) {
+  var list = loadPayments();
+  var idx = list.findIndex(function(p) { return String(p.id) === String(req.params.id); });
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  list[idx].no_bill_expected = !!req.body.expected;
+  savePayments(list);
+  res.json({ ok: true, record: list[idx] });
 });
 
 // Send a recorded slip back to the inbox (deletes the transaction; bills return too)
