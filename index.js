@@ -26,6 +26,7 @@ const SLIPS_DIR  = path.join(DATA_DIR, "slips");
 const BILLS_DIR  = path.join(DATA_DIR, "bills");
 const DATA_FILE  = path.join(DATA_DIR, "payments.json");
 const INBOX_FILE = path.join(DATA_DIR, "inbox.json");
+const CATS_FILE  = path.join(DATA_DIR, "categories.json");
 
 [DATA_DIR, SLIPS_DIR, BILLS_DIR].forEach(function(d) {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
@@ -47,6 +48,16 @@ function loadPayments() {
 function savePayments(list) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(list, null, 2));
 }
+var DEFAULT_CATS = ["ยา/Medicine","เงินเดือน/Salary","โบนัส/Bonus","อาหารพนักงาน/Staff meal","พยาบาล/Nursing fee","หมอ/Doctor fee","ค่าเช่า/Rent","โฆษณา/Advertising","ขนส่ง/Logistics","อุปกรณ์/Equipment","ค่าน้ำค่าไฟ/Utilities","ภาษี-ประกันสังคม/Tax & SSO","อื่นๆ/Other"];
+function loadCategories() {
+  try {
+    if (!fs.existsSync(CATS_FILE)) { fs.writeFileSync(CATS_FILE, JSON.stringify(DEFAULT_CATS, null, 2)); return DEFAULT_CATS.slice(); }
+    var c = JSON.parse(fs.readFileSync(CATS_FILE, "utf8"));
+    return Array.isArray(c) ? c : DEFAULT_CATS.slice();
+  } catch (e) { return DEFAULT_CATS.slice(); }
+}
+function saveCategories(list) { fs.writeFileSync(CATS_FILE, JSON.stringify(list, null, 2)); }
+
 function loadInbox() {
   try {
     if (!fs.existsSync(INBOX_FILE)) return [];
@@ -176,7 +187,7 @@ async function readSlip(imageBase64, caption) {
           role: "user",
           content: [
             { type: "image", source: { type: "base64", media_type: sniffMediaType(imageBase64), data: imageBase64 } },
-            { type: "text", text: "You are an expert Thai bank payment slip reader. Extract ALL details carefully.\n\nThai date formats:\n- DD/MM/YYYY or DD/MM/YY\n- DD MMM YYYY (e.g. 08 พ.ค. 2568)\n- Buddhist year (พ.ศ.) subtract 543 to get AD. 2568=2025, 2569=2026\n- Time: HH:MM or HH:MM:SS\n\nBanks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay.\nUser note: \"" + (caption || "") + "\"\n\nReturn ONLY valid JSON:\n{\n  \"bank_from\": \"bank name or null\",\n  \"account_from\": \"last 4 digits or null\",\n  \"bank_to\": \"bank name or null\",\n  \"account_to\": \"last 4 digits or null\",\n  \"recipient_name\": \"name or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD or null\",\n  \"transaction_time\": \"HH:MM or null\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else infer from recipient\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}" }
+            { type: "text", text: "You are an expert Thai bank payment slip reader. Extract ALL details carefully.\n\nThai date formats:\n- DD/MM/YYYY or DD/MM/YY\n- DD MMM YYYY (e.g. 08 พ.ค. 2568)\n- Buddhist year (พ.ศ.) subtract 543 to get AD. 2568=2025, 2569=2026\n- Time: HH:MM or HH:MM:SS\n\nBanks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay.\nUser note: \"" + (caption || "") + "\"\n\nReturn ONLY valid JSON:\n{\n  \"bank_from\": \"bank name or null\",\n  \"account_from\": \"last 4 digits or null\",\n  \"bank_to\": \"bank name or null\",\n  \"account_to\": \"last 4 digits or null\",\n  \"recipient_name\": \"name or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD or null\",\n  \"transaction_time\": \"HH:MM or null\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else infer from recipient\",\n  \"category\": \"exactly one string from this list that best fits the payment, or null: " + JSON.stringify(loadCategories()) + "\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}" }
           ]
         }]
       },
@@ -227,6 +238,10 @@ async function getImage(client, messageId) {
 
 // ── Create records ─────────────────────────────────────────────────────────
 function createSlipRecord(buf, data, source) {
+  if (data && data.category) {
+    var catsV = loadCategories();
+    if (catsV.indexOf(data.category) === -1) data.category = null;
+  }
   var fname = "slip_" + Date.now() + ".jpg";
   fs.writeFileSync(path.join(SLIPS_DIR, fname), buf);
   var list = loadPayments();
@@ -264,7 +279,7 @@ function slipReply(rec) {
   var amt = rec.amount ? "฿" + Number(rec.amount).toLocaleString("th-TH", { minimumFractionDigits: 2 }) : "?";
   return [
     "✅ #" + showId(rec) + "  " + (rec.bank_from || "?") + "  " + amt,
-    "→ " + (rec.recipient_name || rec.bank_to || "?") + (rec.purpose ? "  (" + rec.purpose + ")" : ""),
+    "→ " + (rec.recipient_name || rec.bank_to || "?") + (rec.purpose ? "  (" + rec.purpose + ")" : "") + (rec.category ? "  🏷" + rec.category.split("/")[0] : ""),
     "📎 Match bills at " + BASE_URL + "/app"
   ].join("\n");
 }
@@ -312,23 +327,23 @@ async function makeReport(year, month) {
   const baseUrl = BASE_URL;
 
   const s1 = wb.addWorksheet("All Transactions");
-  s1.mergeCells("A1:M1");
+  s1.mergeCells("A1:N1");
   var t1 = s1.getCell("A1");
   t1.value = "Payment Report — " + label;
   t1.font = { size: 14, bold: true, color: { argb: "FFFFFFFF" } };
   t1.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1565C0" } };
   t1.alignment = { horizontal: "center" };
   s1.getRow(1).height = 30;
-  styleHdr(s1.addRow(["#","Date","Time","Amount (฿)","From Bank","Acct","To Bank","Acct","Recipient","Purpose","Ref","Type","Evidence"]), "FF0D47A1");
+  styleHdr(s1.addRow(["#","Date","Time","Amount (฿)","From Bank","Acct","To Bank","Acct","Recipient","Purpose","Category","Ref","Type","Evidence"]), "FF0D47A1");
   rows.forEach(function(p, i) {
-    var row = s1.addRow([showId(p),p.transaction_date||"",p.transaction_time||"",Number(p.amount)||0,p.bank_from||"",p.account_from||"",p.bank_to||"",p.account_to||"",p.recipient_name||"",p.purpose||"",p.reference_number||"",(p.slip_type||"").replace(/_/g," "),(getBillFiles(p).length?("✅ "+getBillFiles(p).length):(p.no_bill_expected?"➖":"⚠️"))]);
+    var row = s1.addRow([showId(p),p.transaction_date||"",p.transaction_time||"",Number(p.amount)||0,p.bank_from||"",p.account_from||"",p.bank_to||"",p.account_to||"",p.recipient_name||"",p.purpose||"",p.category||"",p.reference_number||"",(p.slip_type||"").replace(/_/g," "),(getBillFiles(p).length?("✅ "+getBillFiles(p).length):(p.evidence_note?"📝":(p.no_bill_expected?"➖":"⚠️")))]);
     if (i%2===0) row.eachCell(function(c){c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFF3F8FF"}};});
     row.getCell(4).numFmt="#,##0.00"; row.getCell(4).font={bold:true,color:{argb:"FF1565C0"}}; row.height=20;
   });
   var tr=s1.addRow(["","TOTAL","",grandTotal]);
   tr.getCell(4).numFmt="#,##0.00"; tr.getCell(4).font={bold:true,size:13};
   tr.eachCell(function(c){c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFFFF9C4"}};});
-  s1.columns=[{width:9},{width:12},{width:7},{width:14},{width:15},{width:11},{width:15},{width:11},{width:20},{width:28},{width:16},{width:15},{width:10}];
+  s1.columns=[{width:9},{width:12},{width:7},{width:14},{width:15},{width:11},{width:15},{width:11},{width:20},{width:28},{width:20},{width:16},{width:15},{width:10}];
   s1.views=[{state:"frozen",ySplit:2}];
 
   const s2 = wb.addWorksheet("Summary");
@@ -348,9 +363,9 @@ async function makeReport(year, month) {
   var s2tot=s2.addRow(["TOTAL",rows.length,grandTotal,"100%"]);
   s2tot.getCell(3).numFmt="#,##0.00"; s2tot.eachCell(function(c){c.font={bold:true};c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFFFF9C4"}};});
   s2.addRow([]); s2.addRow([]);
-  styleHdr(s2.addRow(["Purpose / Category","Transactions","Total (฿)","% of Total"]),"FF0D47A1");
+  styleHdr(s2.addRow(["Category","Transactions","Total (฿)","% of Total"]),"FF0D47A1");
   var purMap={};
-  rows.forEach(function(p){var k=p.purpose||"Unspecified"; if(!purMap[k])purMap[k]={count:0,sum:0}; purMap[k].count++; purMap[k].sum+=Number(p.amount)||0;});
+  rows.forEach(function(p){var k=p.category||"Uncategorized"; if(!purMap[k])purMap[k]={count:0,sum:0}; purMap[k].count++; purMap[k].sum+=Number(p.amount)||0;});
   Object.entries(purMap).sort(function(a,b){return b[1].sum-a[1].sum;}).forEach(function(e,i){
     var pct=grandTotal>0?(e[1].sum/grandTotal*100).toFixed(1)+"%":"0%";
     var row=s2.addRow([e[0],e[1].count,e[1].sum,pct]);
@@ -424,7 +439,14 @@ async function makeReport(year, month) {
           cell.value={text:"🔗 View Bill"+(maxBills>1?(" "+(bi+1)):""),hyperlink:baseUrl+"/bills/"+bills[bi]};
           cell.font={color:{argb:"FF2E7D32"},underline:true,bold:true};
         } else if(bi===0){
-          if(p.no_bill_expected){
+          if(p.evidence_note){
+            cell.value="📝 "+p.evidence_note;
+            cell.font={italic:true,color:{argb:"FF37474F"}};
+            cell.alignment={wrapText:true,vertical:"top"};
+            var noteLines=Math.ceil(String(p.evidence_note).length/26)+(String(p.evidence_note).split("\n").length-1);
+            var nh=Math.max(22,Math.min(140,(noteLines+1)*13));
+            if(nh>row.height) row.height=nh;
+          } else if(p.no_bill_expected){
             cell.value="➖ No bill expected";
             cell.font={italic:true,color:{argb:"FF9E9E9E"}};
           } else {
@@ -548,14 +570,24 @@ async function handleEvent(event) {
       }
     }
 
-    // Text after a slip = purpose note
+    // Text after a slip: "note:" = evidence note, plain = purpose (window stays open 5 min)
     if (last) {
       var list = loadPayments();
       var idx = list.findIndex(function(p) { return p.id === last.paymentId; });
-      if (idx !== -1) { list[idx].purpose = txt; savePayments(list); }
-      delete lastSlip[uid];
-      var pid = idx !== -1 ? showId(list[idx]) : "?";
-      return client.replyMessage(event.replyToken, { type: "text", text: "✅ Purpose saved for #" + pid + ": " + txt });
+      if (idx === -1) { delete lastSlip[uid]; return; }
+      var pid = showId(list[idx]);
+      if (/^note\s*:/i.test(txt)) {
+        var noteTxt = txt.replace(/^note\s*:/i, "").trim();
+        if (noteTxt) {
+          list[idx].evidence_note = noteTxt;
+          savePayments(list);
+          return client.replyMessage(event.replyToken, { type: "text", text: "📝 Evidence note saved for #" + pid });
+        }
+        return client.replyMessage(event.replyToken, { type: "text", text: "⚠️ Empty note — type: note: <your text>" });
+      }
+      list[idx].purpose = txt;
+      savePayments(list);
+      return client.replyMessage(event.replyToken, { type: "text", text: "✅ Purpose saved for #" + pid + ": " + txt + "\n(You can also send: note: <evidence text>)" });
     }
   }
 }
@@ -731,6 +763,62 @@ app.post("/api/slips/:id/bill-upload", auth, function(req, res) {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Categories
+app.get("/api/categories", auth, function(req, res) { res.json(loadCategories()); });
+app.post("/api/categories", auth, function(req, res) {
+  var cats = req.body && req.body.categories;
+  if (!Array.isArray(cats)) return res.status(400).json({ error: "categories must be an array" });
+  cats = cats.map(function(c){ return String(c).trim(); }).filter(function(c){ return c.length > 0; });
+  if (!cats.length) return res.status(400).json({ error: "list cannot be empty" });
+  saveCategories(cats);
+  res.json({ ok: true, categories: cats });
+});
+
+// Bulk auto-categorize one month (text-only AI call, chunks of 60)
+app.post("/api/categorize", auth, async function(req, res) {
+  try {
+    var year = parseInt(req.body.year), month = parseInt(req.body.month);
+    if (!year || !month) return res.status(400).json({ error: "year/month required" });
+    var cats = loadCategories();
+    var list = loadPayments();
+    var targets = list.filter(function(p) {
+      if (p.category) return false;
+      if (!p.transaction_date) return false;
+      var d = parseISO(p.transaction_date);
+      return d.getFullYear() === year && d.getMonth() + 1 === month;
+    });
+    if (!targets.length) return res.json({ ok: true, categorized: 0, of: 0 });
+    var updated = 0;
+    for (var off = 0; off < targets.length; off += 60) {
+      var chunk = targets.slice(off, off + 60).map(function(p) {
+        return { id: p.id, purpose: p.purpose || "", recipient: p.recipient_name || "", amount: Number(p.amount) || 0 };
+      });
+      var resp = await axios.post(
+        "https://api.anthropic.com/v1/messages",
+        { model: "claude-sonnet-4-5", max_tokens: 3000, messages: [{ role: "user", content:
+          "You are classifying clinic expense transactions into categories.\nCategories (use the exact strings): " + JSON.stringify(cats) +
+          "\nTransactions: " + JSON.stringify(chunk) +
+          "\nReturn ONLY a JSON array like [{\"id\":1,\"category\":\"...\"}]. Use null when nothing fits well." }] },
+        { headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
+      );
+      var raw = resp.data.content[0].text.trim().replace(/```json/g, "").replace(/```/g, "").trim();
+      var mapping = JSON.parse(raw);
+      var fresh = loadPayments();
+      mapping.forEach(function(m) {
+        if (!m || m.category == null) return;
+        if (cats.indexOf(m.category) === -1) return;
+        var i2 = fresh.findIndex(function(p) { return p.id === m.id; });
+        if (i2 !== -1 && !fresh[i2].category) { fresh[i2].category = m.category; updated++; }
+      });
+      savePayments(fresh);
+    }
+    res.json({ ok: true, categorized: updated, of: targets.length });
+  } catch (e) {
+    console.error("Categorize error:", e.message, e.response ? JSON.stringify(e.response.data) : "");
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Mark / unmark a slip as "no bill expected"
 app.post("/api/slips/:id/no-bill", auth, function(req, res) {
   var list = loadPayments();
@@ -800,10 +888,14 @@ app.patch("/api/slips/:id", auth, function(req, res) {
   var list = loadPayments();
   var idx = list.findIndex(function(p) { return String(p.id) === String(req.params.id); });
   if (idx === -1) return res.status(404).json({ error: "not found" });
-  var allowed = ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number"];
+  var allowed = ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number","category","evidence_note"];
   allowed.forEach(function(f) {
     if (req.body[f] !== undefined) list[idx][f] = req.body[f];
   });
+  if (list[idx].category) {
+    var catsP = loadCategories();
+    if (catsP.indexOf(list[idx].category) === -1) list[idx].category = null;
+  }
   if (!list[idx].display_id && list[idx].transaction_date) {
     list[idx].display_id = nextDisplayId(list[idx].transaction_date);
   }
