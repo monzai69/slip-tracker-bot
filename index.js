@@ -58,6 +58,25 @@ function loadCategories() {
 }
 function saveCategories(list) { fs.writeFileSync(CATS_FILE, JSON.stringify(list, null, 2)); }
 
+// ── Category learning: vendor memory + examples from past corrections ──
+function vendorKey(name) { return String(name || "").trim().toLowerCase().replace(/\s+/g, " "); }
+function vendorCategoryMap() {
+  var map = {};
+  loadPayments().forEach(function(p) {
+    if (p.category && p.recipient_name) map[vendorKey(p.recipient_name)] = p.category; // later entries (newer) win
+  });
+  return map;
+}
+function categoryExamples(limit) {
+  var ex = [];
+  var l = loadPayments();
+  for (var i = l.length - 1; i >= 0 && ex.length < (limit || 15); i--) {
+    var p = l[i];
+    if (p.category && (p.purpose || p.recipient_name)) ex.push({ purpose: p.purpose || "", recipient: p.recipient_name || "", category: p.category });
+  }
+  return ex;
+}
+
 function loadInbox() {
   try {
     if (!fs.existsSync(INBOX_FILE)) return [];
@@ -146,6 +165,14 @@ function sniffMediaType(b64) {
   return "image/jpeg";
 }
 
+function safeJson(raw) {
+  var t = String(raw || "").replace(/```json/gi, "").replace(/```/g, "").trim();
+  try { return JSON.parse(t); } catch (e) {}
+  var m = t.match(/\[[\s\S]*\]|\{[\s\S]*\}/);
+  if (m) { try { return JSON.parse(m[0]); } catch (e2) {} }
+  return null;
+}
+
 // ── Claude: detect image type ──────────────────────────────────────────────
 async function detectImageType(imageBase64) {
   try {
@@ -158,7 +185,7 @@ async function detectImageType(imageBase64) {
           role: "user",
           content: [
             { type: "image", source: { type: "base64", media_type: sniffMediaType(imageBase64), data: imageBase64 } },
-            { type: "text", text: "Look at this image carefully and decide if it is a bank transfer confirmation slip or a bill/invoice.\n\nIt is a SLIP if it shows ANY of these:\n- 'Transfer Completed' or 'Transfer Successful'\n- 'โอนเงินสำเร็จ' or 'รายการสำเร็จ'\n- 'Transaction No' or 'Reference No' or 'เลขที่รายการ'\n- Sender account AND receiver account with bank names\n- FROM and TO with account numbers\n- Banks: SCB, KBank, KBIZ, GSB, Krungthai, Bangkok Bank, Krungsri, TMB, TTB, PromptPay\n\nIt is a BILL if it shows ANY of these:\n- QR code for payment (even if it shows an amount or bank account number)\n- Invoice or receipt with list of products/services\n- 'Please pay' or 'Amount due' or 'ยอดที่ต้องชำระ'\n- Bill with company name and itemized costs\n- Bank account number for receiving payment (but NO transfer confirmation)\n\nKEY RULE: A QR code or bank account number shown on a bill is NOT a slip. A slip must show transfer confirmation that money has already been sent.\n\nReturn ONLY one word: SLIP, BILL, or UNKNOWN" }
+            { type: "text", text: "Look at this image carefully and decide if it is a bank transfer confirmation slip or a bill/invoice.\n\nIt is a SLIP if it shows ANY of these:\n- 'Transfer Completed' or 'Transfer Successful'\n- 'โอนเงินสำเร็จ' or 'รายการสำเร็จ'\n- 'Transaction No' or 'Reference No' or 'เลขที่รายการ'\n- Sender account AND receiver account with bank names\n- FROM and TO with account numbers\n- Banks: SCB, KBank, KBIZ, GSB, Krungthai, Bangkok Bank, Krungsri, TMB, TTB, PromptPay\n\nIt is a BILL if it shows ANY of these:\n- QR code for payment (even if it shows an amount or bank account number)\n- Invoice or receipt with list of products/services\n- 'Please pay' or 'Amount due' or 'ยอดที่ต้องชำระ'\n- Bill with company name and itemized costs\n- Bank account number for receiving payment (but NO transfer confirmation)\n\nKEY RULE: A QR code or bank account number shown on a bill is NOT a slip. A slip must show transfer confirmation that money has already been sent.\n\nKEY RULE 2: If the image shows NO sender (no From bank/account) and no transfer-success wording, it is a BILL — even when it shows a recipient name and an amount.\n\nReturn ONLY one word: SLIP, BILL, or UNKNOWN" }
           ]
         }]
       },
@@ -187,7 +214,7 @@ async function readSlip(imageBase64, caption) {
           role: "user",
           content: [
             { type: "image", source: { type: "base64", media_type: sniffMediaType(imageBase64), data: imageBase64 } },
-            { type: "text", text: "You are an expert Thai bank payment slip reader. Extract ALL details carefully.\n\nThai date formats:\n- DD/MM/YYYY or DD/MM/YY\n- DD MMM YYYY (e.g. 08 พ.ค. 2568)\n- Buddhist year (พ.ศ.) subtract 543 to get AD. 2568=2025, 2569=2026\n- Time: HH:MM or HH:MM:SS\n\nBanks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay.\nUser note: \"" + (caption || "") + "\"\n\nReturn ONLY valid JSON:\n{\n  \"bank_from\": \"bank name or null\",\n  \"account_from\": \"last 4 digits or null\",\n  \"bank_to\": \"bank name or null\",\n  \"account_to\": \"last 4 digits or null\",\n  \"recipient_name\": \"name or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD or null\",\n  \"transaction_time\": \"HH:MM or null\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else infer from recipient\",\n  \"category\": \"exactly one string from this list that best fits the payment, or null: " + JSON.stringify(loadCategories()) + "\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}" }
+            { type: "text", text: "You are an expert Thai bank payment slip reader. Extract ALL details carefully.\n\nThai date formats:\n- DD/MM/YYYY or DD/MM/YY\n- DD MMM YYYY (e.g. 08 พ.ค. 2568)\n- Buddhist year (พ.ศ.) subtract 543 to get AD. 2568=2025, 2569=2026\n- Time: HH:MM or HH:MM:SS\n\nBanks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay.\nUser note: \"" + (caption || "") + "\"\nOwner's past category choices (match this style): " + JSON.stringify(categoryExamples(15)) + "\n\nReturn ONLY valid JSON:\n{\n  \"bank_from\": \"bank name or null\",\n  \"account_from\": \"last 4 digits or null\",\n  \"bank_to\": \"bank name or null\",\n  \"account_to\": \"last 4 digits or null\",\n  \"recipient_name\": \"name or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD or null\",\n  \"transaction_time\": \"HH:MM or null\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else infer from recipient\",\n  \"category\": \"exactly one string from this list that best fits the payment, or null: " + JSON.stringify(loadCategories()) + "\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}" }
           ]
         }]
       },
@@ -195,7 +222,7 @@ async function readSlip(imageBase64, caption) {
     );
     const raw = resp.data.content[0].text.trim();
     console.log("Claude slip:", raw);
-    return JSON.parse(raw.replace(/```json/g,"").replace(/```/g,"").trim());
+    return safeJson(raw);
   } catch (e) {
     console.error("Claude slip error:", e.message, e.response ? JSON.stringify(e.response.data) : "");
     return null;
@@ -221,7 +248,8 @@ async function readBillAmount(imageBase64) {
       { headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
     );
     const raw = resp.data.content[0].text.trim();
-    const parsed = JSON.parse(raw.replace(/```json/g,"").replace(/```/g,"").trim());
+    const parsed = safeJson(raw);
+    if (!parsed) { console.error("Bill amount: no JSON in reply:", raw.slice(0,80)); return null; }
     return (parsed.amount === 0 || parsed.amount) ? parsed.amount : null;
   } catch (e) {
     console.error("Bill amount error:", e.message, e.response ? JSON.stringify(e.response.data) : "");
@@ -237,10 +265,15 @@ async function getImage(client, messageId) {
 }
 
 // ── Create records ─────────────────────────────────────────────────────────
-function createSlipRecord(buf, data, source) {
+function createSlipRecord(buf, data, source, lineMsgId) {
   if (data && data.category) {
     var catsV = loadCategories();
     if (catsV.indexOf(data.category) === -1) data.category = null;
+  }
+  if (data && data.recipient_name) {
+    var vmNew = vendorCategoryMap();
+    var vk = vendorKey(data.recipient_name);
+    if (vmNew[vk]) data.category = vmNew[vk]; // your past choice beats the AI guess
   }
   var fname = "slip_" + Date.now() + ".jpg";
   fs.writeFileSync(path.join(SLIPS_DIR, fname), buf);
@@ -251,7 +284,8 @@ function createSlipRecord(buf, data, source) {
     imageFile: fname,
     billFile: null,
     savedAt: new Date().toISOString(),
-    source: source
+    source: source,
+    line_msg_ids: lineMsgId ? [lineMsgId] : []
   }, data);
   list.push(rec);
   savePayments(list);
@@ -491,9 +525,17 @@ async function handleEvent(event) {
         var item = createInboxItem(buf, "unknown", null, "line");
         return client.pushMessage(gid, { type: "text", text: "⚠️ Could not read slip — image saved to inbox.\nOrganize at " + BASE_URL + "/app" });
       }
-      var rec = createSlipRecord(buf, data, "line");
+      var rec = createSlipRecord(buf, data, "line", event.message.id);
       lastSlip[uid] = { paymentId: rec.id, expiresAt: Date.now() + 5 * 60 * 1000 };
-      return client.pushMessage(gid, { type: "text", text: slipReply(rec) });
+      try {
+        var pr = await client.pushMessage(gid, { type: "text", text: slipReply(rec) });
+        if (pr && pr.sentMessages && pr.sentMessages[0] && pr.sentMessages[0].id) {
+          var lc = loadPayments();
+          var li = lc.findIndex(function(p) { return p.id === rec.id; });
+          if (li !== -1) { lc[li].line_msg_ids = (lc[li].line_msg_ids || []).concat([pr.sentMessages[0].id]); savePayments(lc); }
+        }
+      } catch (e) { console.error("confirm push error:", e.message); }
+      return;
     }
 
     // BILL or UNKNOWN → just keep the picture, read amount in background for matching
@@ -510,6 +552,35 @@ async function handleEvent(event) {
     var tl = txt.toLowerCase();
     var last = getLastSlip(uid);
 
+    // ── Reply to a slip (or its bot confirmation) = evidence note, any time later ──
+    var qid = event.message.quotedMessageId;
+    if (qid && txt && tl.indexOf("/") !== 0) {
+      var listQ = loadPayments();
+      var qi = listQ.findIndex(function(p) { return (p.line_msg_ids || []).indexOf(qid) !== -1; });
+      if (qi !== -1) {
+        var noteTxtQ = txt.replace(/^note\s*:/i, "").trim();
+        if (noteTxtQ) {
+          listQ[qi].evidence_note = noteTxtQ;
+          savePayments(listQ);
+          return client.replyMessage(event.replyToken, { type: "text", text: "📝 Evidence note saved for #" + showId(listQ[qi]) });
+        }
+      } else if (/^note\b/i.test(txt)) {
+        return client.replyMessage(event.replyToken, { type: "text", text: "⚠️ Can't link this reply to a recorded slip (reply-link works for slips recorded after this update).\nUse instead: note #261015: your text\n(the # number is in the bot's reply, or /list)" });
+      }
+      // otherwise fall through — normal chat reply, not a note
+    }
+
+    // ── note #id: <text> — attach an evidence note to any slip, any age ──
+    var noteIdM = txt.match(/^note\s*#?\s*(\d+)\s*:\s*([\s\S]+)/i);
+    if (noteIdM) {
+      var listN = loadPayments();
+      var ni = listN.findIndex(function(p) { return String(p.display_id) === noteIdM[1] || String(p.id) === noteIdM[1]; });
+      if (ni === -1) return client.replyMessage(event.replyToken, { type: "text", text: "⚠️ No transaction #" + noteIdM[1] + " found. Check /list or the web app." });
+      listN[ni].evidence_note = noteIdM[2].trim();
+      savePayments(listN);
+      return client.replyMessage(event.replyToken, { type: "text", text: "📝 Evidence note saved for #" + showId(listN[ni]) });
+    }
+
     if (tl === "/help" || tl === "help") {
       return client.replyMessage(event.replyToken, {
         type: "text",
@@ -519,6 +590,8 @@ async function handleEvent(event) {
           "📸 Send slip → auto-read & recorded",
           "📸 Send bill/other → saved to inbox",
           "💬 Text after slip → sets purpose",
+          "📝 Reply to a slip → saves evidence note",
+          "📝 note #261015: text → note for any slip",
           "",
           "🌐 Web App (upload, match, edit):",
           BASE_URL + "/app",
@@ -787,8 +860,22 @@ app.post("/api/categorize", auth, async function(req, res) {
       var d = parseISO(p.transaction_date);
       return d.getFullYear() === year && d.getMonth() + 1 === month;
     });
-    if (!targets.length) return res.json({ ok: true, categorized: 0, of: 0 });
+    var totalTargets = targets.length;
+    if (!totalTargets) return res.json({ ok: true, categorized: 0, of: 0 });
     var updated = 0;
+    // Pass 1: vendor memory (no AI, free)
+    var vmB = vendorCategoryMap();
+    var freshPre = loadPayments();
+    targets = targets.filter(function(p) {
+      var k = vendorKey(p.recipient_name);
+      if (p.recipient_name && vmB[k]) {
+        var iP = freshPre.findIndex(function(q) { return q.id === p.id; });
+        if (iP !== -1 && !freshPre[iP].category) { freshPre[iP].category = vmB[k]; updated++; }
+        return false;
+      }
+      return true;
+    });
+    savePayments(freshPre);
     for (var off = 0; off < targets.length; off += 60) {
       var chunk = targets.slice(off, off + 60).map(function(p) {
         return { id: p.id, purpose: p.purpose || "", recipient: p.recipient_name || "", amount: Number(p.amount) || 0 };
@@ -797,12 +884,13 @@ app.post("/api/categorize", auth, async function(req, res) {
         "https://api.anthropic.com/v1/messages",
         { model: "claude-sonnet-4-5", max_tokens: 3000, messages: [{ role: "user", content:
           "You are classifying clinic expense transactions into categories.\nCategories (use the exact strings): " + JSON.stringify(cats) +
+          "\nThe owner's past choices (match this style): " + JSON.stringify(categoryExamples(20)) +
           "\nTransactions: " + JSON.stringify(chunk) +
           "\nReturn ONLY a JSON array like [{\"id\":1,\"category\":\"...\"}]. Use null when nothing fits well." }] },
         { headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" } }
       );
-      var raw = resp.data.content[0].text.trim().replace(/```json/g, "").replace(/```/g, "").trim();
-      var mapping = JSON.parse(raw);
+      var mapping = safeJson(resp.data.content[0].text);
+      if (!Array.isArray(mapping)) { console.error("Categorize: no JSON array in reply"); continue; }
       var fresh = loadPayments();
       mapping.forEach(function(m) {
         if (!m || m.category == null) return;
@@ -812,7 +900,7 @@ app.post("/api/categorize", auth, async function(req, res) {
       });
       savePayments(fresh);
     }
-    res.json({ ok: true, categorized: updated, of: targets.length });
+    res.json({ ok: true, categorized: updated, of: totalTargets });
   } catch (e) {
     console.error("Categorize error:", e.message, e.response ? JSON.stringify(e.response.data) : "");
     res.status(500).json({ error: e.message });
