@@ -84,6 +84,20 @@ input[type=file]{display:none;}
 .bill-thumb{border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#F7F9FF;}
 .bill-thumb img{width:100%;height:110px;object-fit:cover;cursor:pointer;display:block;}
 .bill-thumb .bt-actions{padding:6px;display:flex;justify-content:space-between;align-items:center;font-size:11px;}
+.tag-cat{background:#EDE7F6;color:#5E35B1;}
+.tag-note{background:#ECEFF1;color:#37474F;}
+textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10px;font-family:'Sarabun';font-size:14px;min-height:90px;resize:vertical;}
+.bar-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;}
+.bar-label{width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;}
+.bar-track{flex:1;background:#E6EDFC;border-radius:8px;height:18px;overflow:hidden;}
+.bar-fill{background:var(--blue);height:100%;border-radius:8px;min-width:2px;}
+.bar-amt{width:92px;text-align:right;font-weight:700;color:var(--blue);flex:none;}
+.stats-table{width:100%;border-collapse:collapse;font-size:13px;background:#fff;border-radius:10px;overflow:hidden;}
+.stats-table th{background:var(--blue);color:#fff;padding:8px 6px;font-size:12px;text-align:left;}
+.stats-table td{padding:7px 6px;border-bottom:1px solid var(--border);}
+.stats-table td.num{text-align:right;font-weight:600;}
+.chip{display:inline-flex;align-items:center;gap:6px;background:#EDE7F6;color:#5E35B1;border-radius:14px;padding:4px 10px;font-size:12px;font-weight:700;margin:3px 4px 3px 0;}
+.chip b{cursor:pointer;color:#B71C1C;}
 </style>
 </head>
 <body>
@@ -163,6 +177,28 @@ input[type=file]{display:none;}
     <div id="uploadProg" class="mt"></div>
   </div>
 
+  <!-- STATS -->
+  <div class="view hidden" id="view-stats">
+    <div class="row"><select id="statsMonth" onchange="loadStats()" style="flex:1"></select></div>
+    <div class="section-title">📊 Spending by category</div>
+    <div id="statsBars"></div>
+    <div id="statsTableWrap" class="mt"></div>
+    <div class="section-title mt">🤖 Auto-categorize</div>
+    <div class="card">
+      <div class="small">AI assigns a category to every uncategorized transaction in the selected month (1 cheap text call, no images). You can correct any of them afterwards.</div>
+      <button class="btn btn-blue btn-full" id="catBtn" onclick="runCategorize()">🤖 Auto-categorize this month</button>
+    </div>
+    <div class="section-title mt">🏷 Manage categories</div>
+    <div class="card">
+      <div id="catChips"></div>
+      <div class="row mt">
+        <input id="newCat" placeholder="New category e.g. ยา/Medicine" style="flex:1">
+        <button class="btn btn-green btn-sm" onclick="addCat()">＋ Add</button>
+      </div>
+      <div class="small mt">Tap ✕ on a chip to remove. Changes apply to AI picks immediately; existing transactions keep their category.</div>
+    </div>
+  </div>
+
   <!-- REPORT -->
   <div class="view hidden" id="view-report">
     <div class="card">
@@ -187,6 +223,7 @@ input[type=file]{display:none;}
     <div class="tab" data-v="slips" onclick="switchTab('slips')"><span class="ico">🧾</span>Slips</div>
     <div class="tab" data-v="match" onclick="switchTab('match')"><span class="ico">🔗</span>Match</div>
     <div class="tab" data-v="upload" onclick="switchTab('upload')"><span class="ico">📸</span>Upload</div>
+    <div class="tab" data-v="stats" onclick="switchTab('stats')"><span class="ico">📈</span>Stats</div>
     <div class="tab" data-v="report" onclick="switchTab('report')"><span class="ico">📊</span>Report</div>
   </div>
 </div>
@@ -221,6 +258,12 @@ input[type=file]{display:none;}
   <div class="modal-box">
     <h3 id="bmTitle">📄 Bills</h3>
     <div id="bmThumbs" class="bill-thumbs"></div>
+    <div class="section-title">📝 Evidence note</div>
+    <textarea id="bmNote" placeholder="Paste the vendor's message or type an explanation — this counts as the bill evidence"></textarea>
+    <div class="row mt" style="margin-bottom:4px">
+      <button class="btn btn-blue btn-sm" style="flex:1" onclick="saveNote()">💾 Save note</button>
+      <button class="btn btn-red btn-sm" onclick="clearNote()">🗑 Clear</button>
+    </div>
     <div class="section-title">＋ Add bill</div>
     <button class="btn btn-orange btn-full" style="margin-top:0" onclick="document.getElementById('bmFile').click()">📸 Upload from device</button>
     <input type="file" id="bmFile" accept="image/*" multiple onchange="bmUpload(this.files)">
@@ -274,10 +317,15 @@ function login() {
 }
 function logout() { TOKEN=""; localStorage.removeItem("st_token"); showLogin(); }
 function showLogin() { document.getElementById("loginView").classList.remove("hidden"); document.getElementById("appView").classList.add("hidden"); }
+var CATS = [];
+function loadCats(cb) {
+  api("GET","/api/categories").then(function(c) { CATS = c; if (cb) cb(); });
+}
 function showApp() {
   document.getElementById("loginView").classList.add("hidden");
   document.getElementById("appView").classList.remove("hidden");
   initMonthPickers();
+  loadCats();
   loadInbox(); loadSlips(); loadMatch();
 }
 
@@ -290,6 +338,7 @@ function switchTab(v) {
   if (v==="inbox") loadInbox();
   if (v==="slips") loadSlips();
   if (v==="match") loadMatch();
+  if (v==="stats") loadCats(loadStats);
 }
 
 // ── Inbox ──
@@ -438,6 +487,15 @@ function initMonthPickers() {
   }
   var oAll=document.createElement("option"); oAll.value="all"; oAll.textContent="All months"; mm.appendChild(oAll);
   var oNd=document.createElement("option"); oNd.value="nodate"; oNd.textContent="⚠️ No date"; mm.appendChild(oNd);
+  var sm = document.getElementById("statsMonth");
+  sm.innerHTML = "";
+  for (var si=0; si<14; si++) {
+    var sd = new Date(now.getFullYear(), now.getMonth()-si, 1);
+    var so = document.createElement("option");
+    so.value = sd.getFullYear()+"-"+(sd.getMonth()+1);
+    so.textContent = sd.toLocaleDateString("en-US",{month:"long",year:"numeric"});
+    sm.appendChild(so);
+  }
 }
 function loadSlips() {
   var v = document.getElementById("slipMonth").value;
@@ -457,13 +515,15 @@ function loadSlips() {
     el.innerHTML = list.slice().reverse().map(function(p) {
       var bl = bills(p);
       var billBtn;
-      if (bl.length) billBtn = '<button class="btn btn-green btn-sm" onclick="openBills('+p.id+')">📄 Bills ('+bl.length+')</button>';
+      if (bl.length) billBtn = '<button class="btn btn-green btn-sm" onclick="openBills('+p.id+')">📄 Bills ('+bl.length+')'+(p.evidence_note?' +📝':'')+'</button>';
+      else if (p.evidence_note) billBtn = '<button class="btn btn-sm" style="background:#ECEFF1;color:#37474F" onclick="openBills('+p.id+')">📝 Note</button>';
       else if (p.no_bill_expected) billBtn = '<button class="btn btn-gray btn-sm" onclick="unmarkNoBill('+p.id+')">➖ No bill expected</button>';
       else billBtn = '<button class="btn btn-orange btn-sm" onclick="openBills('+p.id+')">＋ Add bill</button>';
+      var catChip = p.category ? '<span class="tag tag-cat">🏷 '+esc(p.category.split("/")[0])+'</span>' : '';
       return '<div class="slip-item">'+
         '<div class="slip-head"><span class="slip-id">#'+esc(p.display_id||p.id)+'</span><span class="amt">฿'+Number(p.amount||0).toLocaleString("th-TH",{minimumFractionDigits:2})+'</span></div>'+
         '<div class="small mt">'+(p.transaction_date||"⚠️ no date")+' '+(p.transaction_time||"")+' · '+esc(p.bank_from||"?")+' ****'+esc(p.account_from||"????")+' → '+esc(p.recipient_name||p.bank_to||"?")+'</div>'+
-        '<div class="small">'+esc(p.purpose||"-")+'</div>'+
+        '<div class="small">'+esc(p.purpose||"-")+' '+catChip+'</div>'+
         '<div class="row mt">'+
           billBtn+
           (p.imageFile?'<button class="btn btn-gray btn-sm" onclick="viewImg(\'/slips/'+esc(p.imageFile)+'\')">🧾 Slip</button>':'')+
@@ -499,6 +559,7 @@ function renderBillsModal() {
   if (!p) { closeBills(); return; }
   var bl = bills(p);
   document.getElementById("bmTitle").textContent = "📄 Bills of #"+(p.display_id||p.id)+" — ฿"+Number(p.amount||0).toLocaleString("th-TH");
+  document.getElementById("bmNote").value = p.evidence_note || "";
   document.getElementById("bmThumbs").innerHTML = bl.length ? bl.map(function(f,ix) {
     return '<div class="bill-thumb">'+
       '<img src="/bills/'+esc(f)+'" onclick="viewImg(this.src)">'+
@@ -524,6 +585,17 @@ function renderBillsModal() {
         '<button class="btn btn-gray btn-sm" style="padding:3px 8px;flex:none" onclick="event.stopPropagation();viewImg(\'/bills/'+esc(b.file)+'\')">🔍</button></div>';
     }).join("");
   });
+}
+function saveNote() {
+  var txt = document.getElementById("bmNote").value.trim();
+  api("PATCH","/api/slips/"+billsSlipId,{evidence_note: txt===""?null:txt}).then(function() {
+    toast(txt?"📝 Note saved":"🗑 Note cleared");
+    refreshSlipsCacheThen(renderBillsModal); loadMatch();
+  });
+}
+function clearNote() {
+  document.getElementById("bmNote").value = "";
+  saveNote();
 }
 function removeBill(file) {
   if (!confirm("Remove this bill from the slip? It goes back to the inbox.")) return;
@@ -596,7 +668,8 @@ function openEdit(id) {
     ["bank_to","To Bank","text"],["account_to","To Acct (last 4)","text"],
     ["recipient_name","Recipient","text"],["purpose","Purpose","text"],["reference_number","Reference","text"]
   ];
-  document.getElementById("editFields").innerHTML = fields.map(function(f) {
+  var catOpts = '<option value="">— no category —</option>' + CATS.map(function(c){ return '<option value="'+esc(c)+'"'+(p.category===c?' selected':'')+'>'+esc(c)+'</option>'; }).join("");
+  document.getElementById("editFields").innerHTML = '<div class="field"><label>Category</label><select id="ef_category">'+catOpts+'</select></div>' + fields.map(function(f) {
     return '<div class="field"><label>'+f[1]+'</label><input id="ef_'+f[0]+'" type="'+f[2]+'" value="'+((p[f[0]]!==null&&p[f[0]]!==undefined)?esc(p[f[0]]):"")+'"></div>';
   }).join("");
   document.getElementById("editModal").classList.add("open");
@@ -608,6 +681,8 @@ function saveEdit() {
     var v = document.getElementById("ef_"+f).value;
     body[f] = (f==="amount") ? (v===""?null:Number(v)) : (v===""?null:v);
   });
+  var cv = document.getElementById("ef_category").value;
+  body.category = cv===""?null:cv;
   api("PATCH","/api/slips/"+editId, body).then(function(){ toast("✅ Saved"); closeEdit(); loadSlips(); });
 }
 
@@ -644,7 +719,7 @@ function loadMatch() {
   var slipSort = (document.getElementById("mSlipSort")||{}).value || "tx_desc";
   var billSort = (document.getElementById("mBillSort")||{}).value || "up_desc";
   api("GET","/api/slips").then(function(list) {
-    var noBill = list.filter(function(p){ return bills(p).length===0 && !p.no_bill_expected; });
+    var noBill = list.filter(function(p){ return bills(p).length===0 && !p.no_bill_expected && !p.evidence_note; });
     if (monthV==="nodate") {
       noBill = noBill.filter(function(p){ return !p.transaction_date; });
     } else if (monthV!=="all") {
@@ -707,6 +782,92 @@ function tryMatch() {
     else toast("❌ "+(d.error||"error"));
     selectedSlip=null; selectedBill=null;
     loadMatch(); loadInbox(); loadSlips();
+  });
+}
+
+// ── Stats ──
+function statsAgg(list) {
+  var agg = {};
+  list.forEach(function(p) {
+    var k = p.category || "Uncategorized";
+    if (!agg[k]) agg[k] = { count: 0, sum: 0 };
+    agg[k].count++; agg[k].sum += Number(p.amount) || 0;
+  });
+  return agg;
+}
+function loadStats() {
+  var v = document.getElementById("statsMonth").value.split("-");
+  var y = +v[0], m = +v[1];
+  var py = m === 1 ? y - 1 : y, pm = m === 1 ? 12 : m - 1;
+  Promise.all([
+    api("GET","/api/slips?year="+y+"&month="+m),
+    api("GET","/api/slips?year="+py+"&month="+pm)
+  ]).then(function(r) {
+    var cur = statsAgg(r[0]), prev = statsAgg(r[1]);
+    var total = 0; Object.keys(cur).forEach(function(k){ total += cur[k].sum; });
+    var keys = Object.keys(cur).sort(function(a,b){ return cur[b].sum - cur[a].sum; });
+    var maxSum = keys.length ? cur[keys[0]].sum : 0;
+    // bars
+    document.getElementById("statsBars").innerHTML = keys.length ? keys.map(function(k) {
+      var w = maxSum > 0 ? Math.round(cur[k].sum/maxSum*100) : 0;
+      return '<div class="bar-row"><div class="bar-label" title="'+esc(k)+'">'+esc(k.split("/")[0])+'</div>'+
+        '<div class="bar-track"><div class="bar-fill" style="width:'+w+'%"></div></div>'+
+        '<div class="bar-amt">฿'+cur[k].sum.toLocaleString("th-TH")+'</div></div>';
+    }).join("") : '<div class="empty small">No transactions this month</div>';
+    // table with prev-month comparison
+    var rowsHtml = keys.map(function(k) {
+      var pct = total > 0 ? (cur[k].sum/total*100).toFixed(1)+"%" : "-";
+      var pv = prev[k] ? prev[k].sum : 0;
+      var delta;
+      if (pv === 0) delta = cur[k].sum > 0 ? '<span style="color:#C62828">new</span>' : "-";
+      else {
+        var ch = (cur[k].sum - pv) / pv * 100;
+        var col = ch > 0 ? "#C62828" : "#1B8A4C";
+        delta = '<span style="color:'+col+'">'+(ch>0?"▲":"▼")+" "+Math.abs(ch).toFixed(0)+"%</span>";
+      }
+      return "<tr><td>"+esc(k)+"</td><td class='num'>"+cur[k].count+"</td><td class='num'>฿"+cur[k].sum.toLocaleString("th-TH",{minimumFractionDigits:2})+"</td><td class='num'>"+pct+"</td><td class='num'>"+delta+"</td></tr>";
+    }).join("");
+    document.getElementById("statsTableWrap").innerHTML = keys.length ?
+      "<table class='stats-table'><tr><th>Category</th><th>Count</th><th>Total</th><th>%</th><th>vs prev</th></tr>"+rowsHtml+
+      "<tr><td><b>TOTAL</b></td><td class='num'><b>"+r[0].length+"</b></td><td class='num'><b>฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2})+"</b></td><td class='num'>100%</td><td></td></tr></table>" : "";
+    renderCatChips();
+  });
+}
+function renderCatChips() {
+  document.getElementById("catChips").innerHTML = CATS.map(function(c,i) {
+    return '<span class="chip">'+esc(c)+' <b onclick="delCat('+i+')">✕</b></span>';
+  }).join("");
+}
+function saveCats() {
+  api("POST","/api/categories",{categories:CATS}).then(function(d) {
+    if (d.ok) { CATS = d.categories; renderCatChips(); toast("🏷 Categories saved"); }
+    else toast("❌ "+(d.error||"error"));
+  });
+}
+function addCat() {
+  var v = document.getElementById("newCat").value.trim();
+  if (!v) return;
+  if (CATS.indexOf(v) !== -1) { toast("Already exists"); return; }
+  CATS.push(v);
+  document.getElementById("newCat").value = "";
+  saveCats();
+}
+function delCat(i) {
+  if (!confirm("Remove category '"+CATS[i]+"'?\nTransactions already using it keep the label.")) return;
+  CATS.splice(i,1);
+  saveCats();
+}
+function runCategorize() {
+  var v = document.getElementById("statsMonth").value.split("-");
+  var btn = document.getElementById("catBtn");
+  btn.disabled = true; btn.textContent = "🤖 Working...";
+  api("POST","/api/categorize",{year:+v[0],month:+v[1]}).then(function(d) {
+    btn.disabled = false; btn.textContent = "🤖 Auto-categorize this month";
+    if (d.ok) { toast("🏷 "+d.categorized+" of "+d.of+" categorized"); loadStats(); loadSlips(); }
+    else toast("❌ "+(d.error||"error"));
+  }).catch(function() {
+    btn.disabled = false; btn.textContent = "🤖 Auto-categorize this month";
+    toast("❌ failed — check API credits");
   });
 }
 
