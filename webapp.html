@@ -617,11 +617,12 @@ function clsChips(p) {
   if (c.alloc && c.alloc.length) {
     out += '<span class="tag tag-br">🏢 '+c.alloc.map(function(a){ return esc(a.branch)+(c.alloc.length>1?" "+fmtB(a.amount):""); }).join(" · ")+'</span> ';
   }
-  if (c.newAcct) out += '<span class="tag tag-new">🆕 account branch not set</span> ';
+  if (c.noFromAcct) out += '<span class="tag tag-new">⚠️ sender account number unreadable — fix "From Acct" with ✏️ Edit</span> ';
+  else if (c.newAcct) out += '<span class="tag tag-new">🆕 account branch not set</span> ';
   if (c.duplicateOf) out += '<span class="tag tag-new">♊ maybe duplicate of #'+esc(c.duplicateOf)+'</span> ';
   if (c.toSimilar) out += '<span class="tag tag-new">⚠️ to ****'+esc(String(p.account_to||"").replace(/\D/g,"").slice(-4))+' — usually ****'+esc(c.toSimilar)+'?</span> ';
   if (c.recipientUnclear) out += '<span class="tag tag-new">❓ recipient unclear — fix with ✏️ Edit</span> ';
-  if (p.recipient_read) out += '<span class="tag tag-note">✏️ read as '+esc(p.recipient_read)+'</span>';
+
   return out;
 }
 function clsActions(p) {
@@ -851,6 +852,7 @@ function openEdit(id) {
     '<div class="field"><label>Internal transfer?</label><select id="ef_internal" data-was="'+iv+'">'+intOpts+'</select></div>' + fields.map(function(f) {
     return '<div class="field"><label>'+f[1]+'</label><input id="ef_'+f[0]+'" type="'+f[2]+'" value="'+((p[f[0]]!==null&&p[f[0]]!==undefined)?esc(p[f[0]]):"")+'"></div>';
   }).join("");
+  if (p.recipient_read && p.recipient_read !== p.recipient_name) document.getElementById("editFields").insertAdjacentHTML("afterbegin", '<div class="small" style="margin-bottom:8px">✏️ AI first read the recipient as "'+esc(p.recipient_read)+'" — remembered, so the same misread is corrected automatically next time.</div>');
   if (p._cls && p._cls.recipientUnclear) document.getElementById("editFields").insertAdjacentHTML("afterbegin", '<div class="suggest">❓ The recipient was read as the sender\'s name. Fix "Recipient" below, or <a href="#" onclick="markSlip('+p.id+',{recipient_ok:true});closeEdit();return false">it is correct</a>.</div>');
   document.getElementById("editModal").classList.add("open");
 }

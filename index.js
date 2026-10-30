@@ -1320,6 +1320,7 @@ app.get("/api/slips", auth, function(req, res) {
       kind: c.kind, via: c.via, fromBranch: c.fromBranch, toBranch: c.toBranch, category: c.category,
       alloc: c.alloc, pending: c.pending, needsBill: c.needsBill,
       newAcct: !!(c.from && !c.from.branch),
+      noFromAcct: c.kind !== "internal" && !last4(p.account_from),
       suggestions: c.kind === "internal" ? linkSuggestions(p, all, reg) : [],
       duplicateOf: (function() { var d = duplicateOf(p, all); return d ? showId(d) : null; })(),
       toSimilar: similarToAccount(p, all),
