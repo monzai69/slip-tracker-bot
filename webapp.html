@@ -617,7 +617,11 @@ function clsChips(p) {
   if (c.alloc && c.alloc.length) {
     out += '<span class="tag tag-br">🏢 '+c.alloc.map(function(a){ return esc(a.branch)+(c.alloc.length>1?" "+fmtB(a.amount):""); }).join(" · ")+'</span> ';
   }
-  if (c.newAcct) out += '<span class="tag tag-new">🆕 account branch not set</span>';
+  if (c.newAcct) out += '<span class="tag tag-new">🆕 account branch not set</span> ';
+  if (c.duplicateOf) out += '<span class="tag tag-new">♊ maybe duplicate of #'+esc(c.duplicateOf)+'</span> ';
+  if (c.toSimilar) out += '<span class="tag tag-new">⚠️ to ****'+esc(String(p.account_to||"").replace(/\D/g,"").slice(-4))+' — usually ****'+esc(c.toSimilar)+'?</span> ';
+  if (c.recipientUnclear) out += '<span class="tag tag-new">❓ recipient unclear — fix with ✏️ Edit</span> ';
+  if (p.recipient_read) out += '<span class="tag tag-note">✏️ read as '+esc(p.recipient_read)+'</span>';
   return out;
 }
 function clsActions(p) {
@@ -847,6 +851,7 @@ function openEdit(id) {
     '<div class="field"><label>Internal transfer?</label><select id="ef_internal" data-was="'+iv+'">'+intOpts+'</select></div>' + fields.map(function(f) {
     return '<div class="field"><label>'+f[1]+'</label><input id="ef_'+f[0]+'" type="'+f[2]+'" value="'+((p[f[0]]!==null&&p[f[0]]!==undefined)?esc(p[f[0]]):"")+'"></div>';
   }).join("");
+  if (p._cls && p._cls.recipientUnclear) document.getElementById("editFields").insertAdjacentHTML("afterbegin", '<div class="suggest">❓ The recipient was read as the sender\'s name. Fix "Recipient" below, or <a href="#" onclick="markSlip('+p.id+',{recipient_ok:true});closeEdit();return false">it is correct</a>.</div>');
   document.getElementById("editModal").classList.add("open");
 }
 function closeEdit(){ document.getElementById("editModal").classList.remove("open"); editId=null; }
@@ -1195,6 +1200,12 @@ function loadReadiness() {
     if (r.missingBill.length) lines.push("⚠️ Missing bill / note: <b>"+r.missingBill.length+"</b> — "+ids(r.missingBill));
     if (r.noCategory.length) lines.push("🏷 No category: <b>"+r.noCategory.length+"</b> — "+ids(r.noCategory));
     if (r.noDate.length) lines.push("📅 No date: <b>"+r.noDate.length+"</b> — "+ids(r.noDate));
+    (r.duplicates||[]).forEach(function(x) {
+      lines.push("♊ #"+esc(x.display_id)+" looks like a duplicate of #"+esc(x.of)+" — "+esc(x.date||"")+" "+fmtB(x.amount)+" "+esc(x.recipient)+
+        '<div class="row mt"><button class="btn btn-red btn-sm" onclick="delDup('+x.id+',\''+esc(x.display_id)+'\')">🗑 Delete #'+esc(x.display_id)+'</button>'+
+        '<button class="btn btn-gray btn-sm" onclick="markSlip('+x.id+',{dup_ok:true})">Not a duplicate</button></div>');
+    });
+    if ((r.recipientUnclear||[]).length) lines.push("❓ Recipient unclear (read as the sender's name): <b>"+r.recipientUnclear.length+"</b> — "+ids(r.recipientUnclear)+" · fix the name with ✏️ Edit on the Slips tab");
     (r.suspectDate||[]).forEach(function(x) {
       lines.push("📅 #"+esc(x.display_id)+" dated <b>"+esc(x.date)+"</b> but uploaded "+(x.savedAt?esc(x.savedAt.slice(0,10)):"?")+" — year misread?"+
         '<div class="row mt">'+(x.suggested?'<button class="btn btn-green btn-sm" onclick="fixDate('+x.id+',\''+esc(x.suggested)+'\')">✅ Change to '+esc(x.suggested)+'</button>':'')+
@@ -1215,6 +1226,13 @@ function fixDate(id, d) {
     if (p.error) { toast("❌ "+p.error); return; }
     toast("📅 Fixed → #"+(p.display_id||p.id)); loadReadiness(); loadSlips(); loadMatch();
   });
+}
+function markSlip(id, body) {
+  api("PATCH","/api/slips/"+id,body).then(function(){ toast("✅ Saved"); loadReadiness(); loadSlips(); });
+}
+function delDup(id, did) {
+  if (!confirm("Delete #"+did+" (the duplicate)? The original stays.")) return;
+  api("DELETE","/api/slips/"+id).then(function(){ toast("🗑 Deleted #"+did); loadReadiness(); loadSlips(); loadMatch(); });
 }
 function dateOk(id) {
   api("PATCH","/api/slips/"+id,{date_ok:true}).then(function(){ toast("✅ Kept"); loadReadiness(); });
