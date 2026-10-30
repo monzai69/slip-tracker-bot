@@ -98,15 +98,16 @@ function correctedName(data) {
 
 // ── Possible duplicates: same transaction number, or same paying account + amount + date + recipient ──
 function refKey(r) { var k = String(r || "").replace(/[^0-9a-z]/gi, "").toUpperCase(); return k.length >= 6 ? k : null; }
+// Same paying account + amount + date always required (two branches may pay one biller the same amount);
+// then the transaction number decides if both have one (a biller's customer reference repeats every time), else the recipient
 function sameSlip(a, b) {
-  if (a.id === b.id) return false;
+  if (a.id === b.id || !a.transaction_date || a.transaction_date !== b.transaction_date) return false;
+  if (Math.abs((Number(a.amount) || 0) - (Number(b.amount) || 0)) >= 0.01) return false;
+  if (normalizeBank(a.bank_from) !== normalizeBank(b.bank_from)) return false;
+  if (String(a.account_from || "").replace(/\D/g, "").slice(-4) !== String(b.account_from || "").replace(/\D/g, "").slice(-4)) return false;
   var ra = refKey(a.reference_number), rb = refKey(b.reference_number);
   if (ra && rb) return ra === rb;
-  return !!a.transaction_date && a.transaction_date === b.transaction_date &&
-    Math.abs((Number(a.amount) || 0) - (Number(b.amount) || 0)) < 0.01 &&
-    normalizeBank(a.bank_from) === normalizeBank(b.bank_from) &&
-    String(a.account_from || "").replace(/\D/g, "").slice(-4) === String(b.account_from || "").replace(/\D/g, "").slice(-4) &&
-    vendorKey(a.recipient_name) === vendorKey(b.recipient_name);
+  return vendorKey(a.recipient_name) === vendorKey(b.recipient_name);
 }
 // the newer slip of each pair is the suspect; dup_ok = you said "not a duplicate"
 function duplicateOf(p, list) {
@@ -589,6 +590,7 @@ function linkSuggestions(t, all, reg) {
   var out = [];
   all.forEach(function(e) {
     if (e.id === t.id || !e.transaction_date) return;
+    if ((t.link_dismissed || []).indexOf(e.id) !== -1) return;
     var ce = classify(e, reg);
     if (ce.kind !== "expense" || ce.fromBranch !== ct.toBranch) return;
     var ea = Number(e.amount) || 0;
@@ -711,6 +713,20 @@ function checkMonth(y, m) {
     if (recipientLooksLikeSender(p, reg)) r.recipientUnclear.push(showId(p));
   });
   r.ready = !r.missingBill.length && !r.noCategory.length && !r.pendingInternal.length && !r.unassigned.length && !r.noDate.length && !r.suspectDate.length && !r.duplicates.length && !r.recipientUnclear.length;
+  // numeric ids per problem + the records themselves (web page shows picture / details and fixes in place)
+  var byShow = {};
+  all.forEach(function(p) { byShow[showId(p)] = p; });
+  var toIds = function(arr) { return arr.map(function(d) { return byShow[d] ? byShow[d].id : null; }).filter(function(x) { return x !== null; }); };
+  r.items = {
+    missingBill: toIds(r.missingBill), noCategory: toIds(r.noCategory), pendingInternal: toIds(r.pendingInternal),
+    noDate: toIds(r.noDate), recipientUnclear: toIds(r.recipientUnclear),
+    duplicates: r.duplicates.map(function(d) { return [d.id, byShow[d.of] ? byShow[d.of].id : null]; })
+  };
+  var need = {};
+  Object.keys(r.items).forEach(function(k) { r.items[k].forEach(function(x) { [].concat(x).forEach(function(id) { if (id !== null) need[id] = true; }); }); });
+  r.suspectDate.forEach(function(x) { need[x.id] = true; });
+  r.slips = {};
+  all.forEach(function(p) { if (need[p.id]) r.slips[p.id] = p; });
   return r;
 }
 
@@ -1434,6 +1450,17 @@ app.post("/api/slips/:id/split", auth, function(req, res) {
   if (split.length) list[idx].split = split; else delete list[idx].split;
   savePayments(list);
   res.json({ ok: true, record: list[idx] });
+});
+// "No, not a share" — hide one link suggestion for good
+app.post("/api/slips/:id/link-dismiss", auth, function(req, res) {
+  var list = loadPayments();
+  var idx = list.findIndex(function(p) { return String(p.id) === String(req.params.id); });
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  var eid = Number(req.body.expenseId);
+  if (!eid) return res.status(400).json({ error: "expenseId required" });
+  list[idx].link_dismissed = (list[idx].link_dismissed || []).filter(function(x) { return x !== eid; }).concat([eid]);
+  savePayments(list);
+  res.json({ ok: true });
 });
 // Link internal transfer → the expense it pays a share of; moves that share to the sender's branch
 app.post("/api/slips/:id/link", auth, function(req, res) {
