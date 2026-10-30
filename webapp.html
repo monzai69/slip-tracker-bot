@@ -98,6 +98,17 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
 .stats-table td.num{text-align:right;font-weight:600;}
 .chip{display:inline-flex;align-items:center;gap:6px;background:#EDE7F6;color:#5E35B1;border-radius:14px;padding:4px 10px;font-size:12px;font-weight:700;margin:3px 4px 3px 0;}
 .chip b{cursor:pointer;color:#B71C1C;}
+.chip-br{background:#E3F2FD;color:var(--blue-d);}
+.chip-br i{cursor:pointer;font-style:normal;}
+.tag-br{background:#E3F2FD;color:var(--blue-d);}
+.tag-int{background:#ECEFF1;color:#546E7A;}
+.tag-petty{background:#FFF8E1;color:#8D6E00;}
+.tag-new{background:#FFEBEE;color:var(--red);}
+.suggest{background:#FFF8E1;border:1px solid #FFE082;border-radius:10px;padding:8px 10px;margin-top:8px;font-size:12px;}
+.acct-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;}
+.acct-row input,.acct-row select{padding:8px;font-size:13px;}
+.ready-ok{color:var(--green);font-weight:700;}
+.ready-line{font-size:13px;padding:4px 0;border-bottom:1px solid var(--border);}
 </style>
 </head>
 <body>
@@ -179,7 +190,8 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
 
   <!-- STATS -->
   <div class="view hidden" id="view-stats">
-    <div class="row"><select id="statsMonth" onchange="loadStats()" style="flex:1"></select></div>
+    <div class="row"><select id="statsMonth" onchange="loadStats()" style="flex:1"></select><select id="statsBranch" onchange="loadStats()" style="flex:1"></select></div>
+    <div class="small mt">🔁 Internal transfers are not counted. Split expenses count only their branch's share.</div>
     <div class="section-title">📊 Spending by category</div>
     <div id="statsBars"></div>
     <div id="statsTableWrap" class="mt"></div>
@@ -208,6 +220,41 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
         <select id="repMonth" style="flex:1"></select>
       </div>
       <button class="btn btn-blue btn-full" onclick="downloadReport()">⬇️ Download Excel</button>
+      <button class="btn btn-gray btn-full" style="margin-top:8px" onclick="loadReadiness()">🔍 Check readiness of this month</button>
+      <div id="readyBox" class="mt"></div>
+    </div>
+
+    <div class="section-title">🏢 Branches</div>
+    <div class="card">
+      <div id="branchChips"></div>
+      <div class="row mt">
+        <input id="newBranch" placeholder="New branch e.g. Samui" style="flex:1">
+        <button class="btn btn-green btn-sm" onclick="addBranch()">＋ Add</button>
+      </div>
+      <div class="small mt">Tap ✏️ to rename (updates accounts and saved splits too).</div>
+    </div>
+
+    <div class="section-title">🏷 Our company names <span class="small">(to spot internal transfers)</span></div>
+    <div class="card">
+      <div id="aliasChips"></div>
+      <div class="row mt">
+        <input id="newAlias" placeholder="e.g. บจก. เรดดี้เช็คโก / READYCHECKGO CO., LTD." style="flex:1">
+        <button class="btn btn-green btn-sm" onclick="addAlias()">＋ Add</button>
+      </div>
+      <div class="small mt">Transfers to a name like these are suggested as 🔁 internal — you confirm each one. Transfers to an account listed below are internal automatically.</div>
+      <button class="btn btn-blue btn-full" id="scanBtn" onclick="runScan()">🔍 Scan for internal transfers since Sep 2026</button>
+    </div>
+
+    <div class="section-title">🏦 Accounts</div>
+    <div class="small" style="margin-bottom:8px">Paying accounts appear here by themselves from slips (🆕 = branch not set). Add petty-cash accounts yourself — they never send slips.</div>
+    <div id="acctList"></div>
+    <div class="card">
+      <b class="small">＋ Add account</b>
+      <div class="row mt">
+        <input id="naBank" placeholder="Bank e.g. KBank" style="flex:1">
+        <input id="naLast4" placeholder="Last 4 digits" style="flex:1" inputmode="numeric">
+      </div>
+      <button class="btn btn-green btn-full" style="margin-top:8px" onclick="addAccount()">＋ Add account</button>
     </div>
   </div>
 
@@ -249,6 +296,24 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
     <div class="row mt">
       <button class="btn btn-blue" style="flex:1" onclick="saveEdit()">Save</button>
       <button class="btn btn-gray" style="flex:1" onclick="closeEdit()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- branch split modal -->
+<div id="splitModal" class="modal">
+  <div class="modal-box">
+    <h3 id="spTitle">🏢 Split by branch</h3>
+    <div class="small" id="spHint" style="margin-bottom:10px"></div>
+    <div id="spRows"></div>
+    <div class="small mt" id="spSum"></div>
+    <div class="row mt">
+      <button class="btn btn-gray btn-sm" onclick="splitEqual()">⚖️ Split equally</button>
+      <button class="btn btn-red btn-sm" onclick="splitClear()">🗑 No split</button>
+    </div>
+    <div class="row mt">
+      <button class="btn btn-blue" style="flex:1" onclick="saveSplit()">Save</button>
+      <button class="btn btn-gray" style="flex:1" onclick="closeSplit()">Cancel</button>
     </div>
   </div>
 </div>
@@ -326,6 +391,7 @@ function showApp() {
   document.getElementById("appView").classList.remove("hidden");
   initMonthPickers();
   loadCats();
+  loadAccounts(fillBranchSelect);
   loadInbox(); loadSlips(); loadMatch();
 }
 
@@ -338,7 +404,8 @@ function switchTab(v) {
   if (v==="inbox") loadInbox();
   if (v==="slips") loadSlips();
   if (v==="match") loadMatch();
-  if (v==="stats") loadCats(loadStats);
+  if (v==="stats") loadCats(function(){ loadAccounts(function(){ fillBranchSelect(); loadStats(); }); });
+  if (v==="report") loadAccounts(function(){ renderAccounts(); loadReadiness(); });
 }
 
 // ── Inbox ──
@@ -475,7 +542,8 @@ function initMonthPickers() {
   for (var y=now.getFullYear(); y>=now.getFullYear()-2; y--) { var o=document.createElement("option"); o.value=y; o.textContent=y; ry.appendChild(o); }
   var mn=["January","February","March","April","May","June","July","August","September","October","November","December"];
   mn.forEach(function(m,ix){ var o=document.createElement("option"); o.value=ix+1; o.textContent=m; rm.appendChild(o); });
-  rm.value = now.getMonth()+1;
+  var lastM = new Date(now.getFullYear(), now.getMonth()-1, 1);
+  ry.value = lastM.getFullYear(); rm.value = lastM.getMonth()+1;
   var mm = document.getElementById("mMonth");
   mm.innerHTML = "";
   for (var mi=0; mi<14; mi++) {
@@ -519,13 +587,19 @@ function loadSlips() {
       else if (p.evidence_note) billBtn = '<button class="btn btn-sm" style="background:#ECEFF1;color:#37474F" onclick="openBills('+p.id+')">📝 Note</button>';
       else if (p.no_bill_expected) billBtn = '<button class="btn btn-gray btn-sm" onclick="unmarkNoBill('+p.id+')">➖ No bill expected</button>';
       else billBtn = '<button class="btn btn-orange btn-sm" onclick="openBills('+p.id+')">＋ Add bill</button>';
-      var catChip = p.category ? '<span class="tag tag-cat">🏷 '+esc(p.category.split("/")[0])+'</span>' : '';
+      var c = p._cls || {};
+      if (c.kind === "internal") billBtn = '';
+      else if (c.needsBill === false && !bl.length && !p.evidence_note) billBtn = '<button class="btn btn-gray btn-sm" onclick="openBills('+p.id+')">＋ Bill (optional)</button>';
+      var cat = c.category || p.category;
+      var catChip = cat ? '<span class="tag tag-cat">🏷 '+esc(cat.split("/")[0])+'</span>' : '';
       return '<div class="slip-item">'+
-        '<div class="slip-head"><span class="slip-id">#'+esc(p.display_id||p.id)+'</span><span class="amt">฿'+Number(p.amount||0).toLocaleString("th-TH",{minimumFractionDigits:2})+'</span></div>'+
+        '<div class="slip-head"><span class="slip-id">#'+esc(p.display_id||p.id)+'</span><span class="amt"'+(c.kind==="internal"?' style="color:#90A4AE;text-decoration:line-through"':'')+'>฿'+Number(p.amount||0).toLocaleString("th-TH",{minimumFractionDigits:2})+'</span></div>'+
         '<div class="small mt">'+(p.transaction_date||"⚠️ no date")+' '+(p.transaction_time||"")+' · '+esc(p.bank_from||"?")+' ****'+esc(p.account_from||"????")+' → '+esc(p.recipient_name||p.bank_to||"?")+'</div>'+
-        '<div class="small">'+esc(p.purpose||"-")+' '+catChip+'</div>'+
+        '<div class="small">'+esc(p.purpose||"-")+' '+catChip+' '+clsChips(p)+'</div>'+
+        clsActions(p)+
         '<div class="row mt">'+
           billBtn+
+          (c.kind && c.kind!=="internal" && BRANCHES.length ? '<button class="btn btn-gray btn-sm" onclick="openSplit('+p.id+')">🏢 Split</button>' : '')+
           (p.imageFile?'<button class="btn btn-gray btn-sm" onclick="viewImg(\'/slips/'+esc(p.imageFile)+'\')">🧾 Slip</button>':'')+
           '<button class="btn btn-blue btn-sm" onclick="openEdit('+p.id+')">✏️ Edit</button>'+
           '<button class="btn btn-gray btn-sm" onclick="backToInbox('+p.id+')">↩️ Back to inbox</button>'+
@@ -534,6 +608,104 @@ function loadSlips() {
     }).join("");
   });
 }
+function fmtB(n){ return "฿"+Number(n||0).toLocaleString("th-TH"); }
+function clsChips(p) {
+  var c = p._cls; if (!c) return "";
+  var out = "";
+  if (c.kind === "internal") out += '<span class="tag tag-int">🔁 Internal'+(c.via==="manual"?" (set by you)":"")+' — not counted</span> ';
+  if (c.kind === "petty_cash") out += '<span class="tag tag-petty">💵 Petty cash</span> ';
+  if (c.alloc && c.alloc.length) {
+    out += '<span class="tag tag-br">🏢 '+c.alloc.map(function(a){ return esc(a.branch)+(c.alloc.length>1?" "+fmtB(a.amount):""); }).join(" · ")+'</span> ';
+  }
+  if (c.newAcct) out += '<span class="tag tag-new">🆕 account branch not set</span>';
+  return out;
+}
+function clsActions(p) {
+  var c = p._cls; if (!c) return "";
+  var html = "";
+  if (c.pending) {
+    html += '<div class="suggest">🤖 Looks like a transfer to <b>our own company</b> — internal (not an expense)?'+
+      '<div class="row mt"><button class="btn btn-green btn-sm" onclick="setInternal('+p.id+',true)">✅ Yes, internal</button>'+
+      '<button class="btn btn-gray btn-sm" onclick="setInternal('+p.id+',false)">❌ No, real expense</button></div></div>';
+  }
+  if (c.kind === "internal") {
+    if (p.linked_to) {
+      html += '<div class="suggest" style="background:#F1F8E9;border-color:#C5E1A5">🔗 Pays a share of expense <b>#'+esc(c.linkedDisplay||p.linked_to)+'</b> — that cost is split to '+esc(c.fromBranch||"?")+
+        ' <button class="btn btn-gray btn-sm" onclick="linkTo('+p.id+',null)">Unlink</button></div>';
+    } else {
+      (c.suggestions||[]).forEach(function(s) {
+        html += '<div class="suggest">🤖 '+esc(c.fromBranch)+' paying its share ('+s.pct+'%) of <b>#'+esc(s.display_id)+'</b> '+fmtB(s.amount)+' · '+esc(s.date)+' · '+esc(s.purpose||s.recipient)+'?'+
+          '<div class="row mt"><button class="btn btn-green btn-sm" onclick="linkTo('+p.id+','+s.id+')">✅ Yes — split '+esc(c.toBranch)+' '+fmtB(s.amount-p.amount)+' / '+esc(c.fromBranch)+' '+fmtB(p.amount)+'</button></div></div>';
+      });
+    }
+    if (c.via === "manual") html += '<div class="row mt"><button class="btn btn-gray btn-sm" onclick="setInternal('+p.id+',null)">↩️ Back to automatic</button></div>';
+  } else if (c.via === "manual") {
+    html += '<div class="small mt">Marked as real expense by you · <a href="#" onclick="setInternal('+p.id+',null);return false">reset</a></div>';
+  }
+  return html;
+}
+function setInternal(id, v) {
+  api("POST","/api/slips/"+id+"/internal",{value:v}).then(function(d){
+    if (d.ok) { toast(v===true?"🔁 Marked internal":(v===false?"✅ Kept as expense":"↩️ Automatic")); loadSlips(); loadMatch(); }
+    else toast("❌ "+(d.error||"error"));
+  });
+}
+function linkTo(id, expenseId) {
+  api("POST","/api/slips/"+id+"/link",{expenseId:expenseId}).then(function(d){
+    if (d.ok) { toast(expenseId===null?"↩️ Unlinked":"🔗 Linked — cost split"); loadSlips(); }
+    else toast("❌ "+(d.error||"error"));
+  });
+}
+
+// ── Branch split ──
+var splitId = null;
+function openSplit(id) {
+  var p = slipsCache.find(function(x){ return x.id===id; });
+  if (!p) return;
+  splitId = id;
+  var c = p._cls || {};
+  var home = c.kind==="petty_cash" ? c.toBranch : c.fromBranch;
+  document.getElementById("spTitle").textContent = "🏢 Split #"+(p.display_id||p.id)+" — "+fmtB(p.amount);
+  document.getElementById("spHint").textContent = "Type an amount or a % (e.g. 50%). Whatever is left stays with "+(home||"the paying account's branch")+".";
+  var cur = {}; (p.split||[]).forEach(function(s){ cur[s.branch]=s.amount; });
+  document.getElementById("spRows").innerHTML = BRANCHES.map(function(b,i) {
+    var isHome = b===home;
+    return '<div class="field"><label>'+esc(b)+(isHome?" (home — gets the rest)":"")+'</label><input id="sp_'+i+'" '+(isHome?'disabled placeholder="rest"':'')+' value="'+(cur[b]!=null&&!isHome?cur[b]:"")+'" oninput="splitSum()"></div>';
+  }).join("");
+  splitSum();
+  document.getElementById("splitModal").classList.add("open");
+}
+function closeSplit(){ document.getElementById("splitModal").classList.remove("open"); splitId=null; }
+function splitVals() {
+  var p = slipsCache.find(function(x){ return x.id===splitId; });
+  var total = Number(p.amount)||0;
+  return BRANCHES.map(function(b,i) {
+    var el = document.getElementById("sp_"+i);
+    var v = el.disabled ? "" : el.value.trim();
+    var amt = /%$/.test(v) ? total*parseFloat(v)/100 : parseFloat(v);
+    return { branch: b, amount: isNaN(amt)?0:Math.round(amt*100)/100 };
+  }).filter(function(s){ return s.amount>0; });
+}
+function splitSum() {
+  var p = slipsCache.find(function(x){ return x.id===splitId; });
+  var used = splitVals().reduce(function(s,x){ return s+x.amount; },0);
+  var rest = (Number(p.amount)||0) - used;
+  document.getElementById("spSum").innerHTML = "Split: "+fmtB(used)+" · rest to home: "+(rest< -1?'<b style="color:#C62828">'+fmtB(rest)+' (too much)</b>':fmtB(rest));
+}
+function splitEqual() {
+  var p = slipsCache.find(function(x){ return x.id===splitId; });
+  var each = Math.round((Number(p.amount)||0)/BRANCHES.length*100)/100;
+  BRANCHES.forEach(function(b,i){ var el=document.getElementById("sp_"+i); if(!el.disabled) el.value=each; });
+  splitSum();
+}
+function splitClear() { BRANCHES.forEach(function(b,i){ document.getElementById("sp_"+i).value=""; }); splitSum(); }
+function saveSplit() {
+  api("POST","/api/slips/"+splitId+"/split",{split:splitVals()}).then(function(d){
+    if (d.ok) { toast("🏢 Split saved"); closeSplit(); loadSlips(); }
+    else toast("❌ "+(d.error||"error"));
+  });
+}
+
 function delSlip(id) {
   if (!confirm("Delete this transaction completely? The slip image and record are removed.")) return;
   api("DELETE","/api/slips/"+id).then(function(){ toast("🗑 Deleted"); loadSlips(); loadMatch(); });
@@ -669,7 +841,10 @@ function openEdit(id) {
     ["recipient_name","Recipient","text"],["purpose","Purpose","text"],["reference_number","Reference","text"]
   ];
   var catOpts = '<option value="">— no category —</option>' + CATS.map(function(c){ return '<option value="'+esc(c)+'"'+(p.category===c?' selected':'')+'>'+esc(c)+'</option>'; }).join("");
-  document.getElementById("editFields").innerHTML = '<div class="field"><label>Category</label><select id="ef_category">'+catOpts+'</select></div>' + fields.map(function(f) {
+  var iv = p.internal===true?"yes":(p.internal===false?"no":"auto");
+  var intOpts = [["auto","🤖 Automatic (by account)"],["yes","🔁 Internal transfer — not counted"],["no","💰 Real expense"]].map(function(o){ return '<option value="'+o[0]+'"'+(iv===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join("");
+  document.getElementById("editFields").innerHTML = '<div class="field"><label>Category</label><select id="ef_category">'+catOpts+'</select></div>' +
+    '<div class="field"><label>Internal transfer?</label><select id="ef_internal" data-was="'+iv+'">'+intOpts+'</select></div>' + fields.map(function(f) {
     return '<div class="field"><label>'+f[1]+'</label><input id="ef_'+f[0]+'" type="'+f[2]+'" value="'+((p[f[0]]!==null&&p[f[0]]!==undefined)?esc(p[f[0]]):"")+'"></div>';
   }).join("");
   document.getElementById("editModal").classList.add("open");
@@ -683,7 +858,11 @@ function saveEdit() {
   });
   var cv = document.getElementById("ef_category").value;
   body.category = cv===""?null:cv;
-  api("PATCH","/api/slips/"+editId, body).then(function(){ toast("✅ Saved"); closeEdit(); loadSlips(); });
+  var ie = document.getElementById("ef_internal");
+  var id = editId;
+  api("PATCH","/api/slips/"+id, body).then(function(){
+    if (ie.value !== ie.getAttribute("data-was")) return api("POST","/api/slips/"+id+"/internal",{value: ie.value==="yes"?true:(ie.value==="no"?false:null)});
+  }).then(function(){ toast("✅ Saved"); closeEdit(); loadSlips(); loadMatch(); });
 }
 
 // ── Match tab ──
@@ -719,7 +898,7 @@ function loadMatch() {
   var slipSort = (document.getElementById("mSlipSort")||{}).value || "tx_desc";
   var billSort = (document.getElementById("mBillSort")||{}).value || "up_desc";
   api("GET","/api/slips").then(function(list) {
-    var noBill = list.filter(function(p){ return bills(p).length===0 && !p.no_bill_expected && !p.evidence_note; });
+    var noBill = list.filter(function(p){ return bills(p).length===0 && !p.no_bill_expected && !p.evidence_note && (!p._cls || p._cls.needsBill); });
     if (monthV==="nodate") {
       noBill = noBill.filter(function(p){ return !p.transaction_date; });
     } else if (monthV!=="all") {
@@ -786,14 +965,28 @@ function tryMatch() {
 }
 
 // ── Stats ──
-function statsAgg(list) {
+// internal transfers skipped; with a branch picked, only that branch's share counts
+function statsAgg(list, branch) {
   var agg = {};
   list.forEach(function(p) {
-    var k = p.category || "Uncategorized";
+    var c = p._cls || {};
+    if (c.kind === "internal") return;
+    var amt = Number(p.amount) || 0;
+    if (branch && branch !== "all") {
+      amt = (c.alloc || []).filter(function(a){ return a.branch === branch; }).reduce(function(s,a){ return s + a.amount; }, 0);
+      if (amt <= 0) return;
+    }
+    var k = c.category || p.category || "Uncategorized";
     if (!agg[k]) agg[k] = { count: 0, sum: 0 };
-    agg[k].count++; agg[k].sum += Number(p.amount) || 0;
+    agg[k].count++; agg[k].sum += amt;
   });
   return agg;
+}
+function fillBranchSelect() {
+  var sel = document.getElementById("statsBranch");
+  var cur = sel.value || "all";
+  sel.innerHTML = '<option value="all">🏢 All branches</option>' + BRANCHES.map(function(b){ return '<option value="'+esc(b)+'">'+esc(b)+'</option>'; }).join("");
+  sel.value = (cur === "all" || BRANCHES.indexOf(cur) !== -1) ? cur : "all";
 }
 function loadStats() {
   var v = document.getElementById("statsMonth").value.split("-");
@@ -803,7 +996,9 @@ function loadStats() {
     api("GET","/api/slips?year="+y+"&month="+m),
     api("GET","/api/slips?year="+py+"&month="+pm)
   ]).then(function(r) {
-    var cur = statsAgg(r[0]), prev = statsAgg(r[1]);
+    var br = document.getElementById("statsBranch").value || "all";
+    var cur = statsAgg(r[0], br), prev = statsAgg(r[1], br);
+    var curCount = 0; Object.keys(cur).forEach(function(k){ curCount += cur[k].count; });
     var total = 0; Object.keys(cur).forEach(function(k){ total += cur[k].sum; });
     var keys = Object.keys(cur).sort(function(a,b){ return cur[b].sum - cur[a].sum; });
     var maxSum = keys.length ? cur[keys[0]].sum : 0;
@@ -829,7 +1024,7 @@ function loadStats() {
     }).join("");
     document.getElementById("statsTableWrap").innerHTML = keys.length ?
       "<table class='stats-table'><tr><th>Category</th><th>Count</th><th>Total</th><th>%</th><th>vs prev</th></tr>"+rowsHtml+
-      "<tr><td><b>TOTAL</b></td><td class='num'><b>"+r[0].length+"</b></td><td class='num'><b>฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2})+"</b></td><td class='num'>100%</td><td></td></tr></table>" : "";
+      "<tr><td><b>TOTAL</b></td><td class='num'><b>"+curCount+"</b></td><td class='num'><b>฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2})+"</b></td><td class='num'>100%</td><td></td></tr></table>" : "";
     renderCatChips();
   });
 }
@@ -898,6 +1093,115 @@ function uploadFiles(files) {
   }
   next();
   document.getElementById("fileInput").value = "";
+}
+
+// ── Accounts / branches / aliases ──
+var ACCTS = { branches: [], aliases: [], accounts: [] }, BRANCHES = [];
+var TYPE_OPTS = [["company","🏦 Company account"],["petty_cash","💵 Petty cash"],["personal","👤 Personal (pays for company)"],["external","🚫 Not ours"]];
+function loadAccounts(cb) {
+  api("GET","/api/accounts").then(function(a) { ACCTS = a; BRANCHES = a.branches; if (cb) cb(); });
+}
+function saveAccounts(msg) {
+  return api("POST","/api/accounts",ACCTS).then(function(a) {
+    if (a.error) { toast("❌ "+a.error); return; }
+    ACCTS = a; BRANCHES = a.branches; renderAccounts(); fillBranchSelect(); toast(msg||"💾 Saved");
+  });
+}
+function renderAccounts() {
+  document.getElementById("branchChips").innerHTML = BRANCHES.length ? BRANCHES.map(function(b,i) {
+    return '<span class="chip chip-br">'+esc(b)+' <i onclick="renameBranch('+i+')">✏️</i> <b onclick="delBranch('+i+')">✕</b></span>';
+  }).join("") : '<div class="small">No branches yet — add your first one.</div>';
+  document.getElementById("aliasChips").innerHTML = ACCTS.aliases.length ? ACCTS.aliases.map(function(a,i) {
+    return '<span class="chip">'+esc(a)+' <b onclick="delAlias('+i+')">✕</b></span>';
+  }).join("") : '<div class="small">No names yet.</div>';
+  var brOpts = function(sel) { return '<option value="">🆕 — choose branch —</option>' + BRANCHES.map(function(b){ return '<option value="'+esc(b)+'"'+(sel===b?' selected':'')+'>'+esc(b)+'</option>'; }).join(""); };
+  var tyOpts = function(sel) { return TYPE_OPTS.map(function(o){ return '<option value="'+o[0]+'"'+(sel===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join(""); };
+  var list = ACCTS.accounts.slice().sort(function(a,b){ return (a.branch?1:0)-(b.branch?1:0); });
+  document.getElementById("acctList").innerHTML = list.map(function(a) {
+    var i = ACCTS.accounts.indexOf(a);
+    var needs = !a.branch && a.type !== "external";
+    return '<div class="card"'+(needs?' style="border-color:#EF9A9A"':'')+'>'+
+      '<div class="slip-head"><b>'+esc(a.bank)+' ****'+esc(a.last4)+'</b>'+(needs?'<span class="tag tag-new">🆕 set branch</span>':'')+'</div>'+
+      '<div class="acct-row">'+
+        '<select onchange="acctSet('+i+',\'branch\',this.value)">'+brOpts(a.branch)+'</select>'+
+        '<select onchange="acctSet('+i+',\'type\',this.value)">'+tyOpts(a.type)+'</select>'+
+        '<input placeholder="Nickname e.g. Samui main" value="'+esc(a.label||"")+'" onchange="acctSet('+i+',\'label\',this.value)">'+
+        '<input placeholder="Other last-4 seen on slips" value="'+esc((a.alt||[]).join(", "))+'" onchange="acctSet('+i+',\'alt\',this.value)">'+
+      '</div>'+
+      '<div class="row mt" style="justify-content:flex-end"><button class="btn btn-red btn-sm" onclick="delAccount('+i+')">🗑 Remove</button></div>'+
+    '</div>';
+  }).join("");
+}
+function acctSet(i, field, v) {
+  if (field === "alt") v = v.split(/[ ,]+/).filter(Boolean);
+  if (field === "branch" && v === "") v = null;
+  ACCTS.accounts[i][field] = v;
+  saveAccounts();
+}
+function addBranch() {
+  var v = document.getElementById("newBranch").value.trim(); if (!v) return;
+  if (BRANCHES.indexOf(v) !== -1) { toast("Already exists"); return; }
+  ACCTS.branches.push(v); document.getElementById("newBranch").value = "";
+  saveAccounts("🏢 Branch added");
+}
+function delBranch(i) {
+  if (!confirm("Remove branch '"+BRANCHES[i]+"'?\nAccounts set to it go back to 🆕. Saved splits keep the old name.")) return;
+  ACCTS.branches.splice(i,1); saveAccounts("🗑 Branch removed");
+}
+function renameBranch(i) {
+  var to = prompt("Rename branch '"+BRANCHES[i]+"' to:", BRANCHES[i]);
+  if (!to || to.trim() === BRANCHES[i]) return;
+  api("POST","/api/branches/rename",{from:BRANCHES[i],to:to.trim()}).then(function(d){
+    if (d.ok) { ACCTS = d.accounts; BRANCHES = d.accounts.branches; renderAccounts(); fillBranchSelect(); toast("✏️ Renamed"+(d.splitsUpdated?" · "+d.splitsUpdated+" split(s) updated":"")); }
+    else toast("❌ "+(d.error||"error"));
+  });
+}
+function addAlias() {
+  var v = document.getElementById("newAlias").value.trim(); if (!v) return;
+  if (ACCTS.aliases.indexOf(v) !== -1) { toast("Already exists"); return; }
+  ACCTS.aliases.push(v); document.getElementById("newAlias").value = "";
+  saveAccounts("🏷 Name added");
+}
+function delAlias(i) { ACCTS.aliases.splice(i,1); saveAccounts("🗑 Name removed"); }
+function addAccount() {
+  var bank = document.getElementById("naBank").value.trim(), l4 = document.getElementById("naLast4").value.replace(/\D/g,"");
+  if (!bank || l4.length < 3) { toast("Enter bank and last 4 digits"); return; }
+  ACCTS.accounts.push({ bank: bank, last4: l4.slice(-4), alt: [], branch: null, type: "petty_cash", label: "" });
+  document.getElementById("naBank").value = ""; document.getElementById("naLast4").value = "";
+  saveAccounts("🏦 Account added — set its branch & type");
+}
+function delAccount(i) {
+  var a = ACCTS.accounts[i];
+  if (!confirm("Remove "+a.bank+" ****"+a.last4+"?\n(If slips still come from it, it will come back as 🆕.)")) return;
+  ACCTS.accounts.splice(i,1); saveAccounts("🗑 Account removed");
+}
+function runScan() {
+  var btn = document.getElementById("scanBtn");
+  btn.disabled = true; btn.textContent = "🔍 Scanning...";
+  api("POST","/api/accounts/scan",{year:2026,month:9}).then(function(d){
+    btn.disabled = false; btn.textContent = "🔍 Scan for internal transfers since Sep 2026";
+    if (d.ok) toast("🔍 Checked "+d.checked+" · "+d.flagged+" to confirm on the Slips tab");
+    else toast("❌ "+(d.error||"error"));
+  }).catch(function(){ btn.disabled = false; btn.textContent = "🔍 Scan for internal transfers since Sep 2026"; toast("❌ failed — check API credits"); });
+}
+function loadReadiness() {
+  var y = document.getElementById("repYear").value, m = document.getElementById("repMonth").value;
+  var box = document.getElementById("readyBox");
+  box.innerHTML = '<div class="small">Checking…</div>';
+  api("GET","/api/check?year="+y+"&month="+m).then(function(r) {
+    var ids = function(a){ return a.slice(0,12).map(function(x){ return "#"+esc(x); }).join(" ")+(a.length>12?" +"+(a.length-12):""); };
+    var lines = [];
+    if (r.missingBill.length) lines.push("⚠️ Missing bill / note: <b>"+r.missingBill.length+"</b> — "+ids(r.missingBill));
+    if (r.noCategory.length) lines.push("🏷 No category: <b>"+r.noCategory.length+"</b> — "+ids(r.noCategory));
+    if (r.noDate.length) lines.push("📅 No date: <b>"+r.noDate.length+"</b> — "+ids(r.noDate));
+    if (r.unassigned.length) lines.push("🆕 Account branch not set: "+r.unassigned.map(esc).join(", "));
+    if (r.pendingInternal.length) lines.push("🔁 Internal transfer to confirm: <b>"+r.pendingInternal.length+"</b> — "+ids(r.pendingInternal));
+    var head = r.ready ? '<div class="ready-ok">✅ Ready — '+r.count+' transactions</div>' : '<div style="font-weight:700;color:var(--orange)">⏳ Not ready yet</div>';
+    var foot = [];
+    if (r.inbox) foot.push("📥 "+r.inbox+" image(s) still in inbox (doesn't block)");
+    foot.push(r.sentAt ? "📨 Auto report sent "+new Date(r.sentAt).toLocaleString("th-TH") : (r.recipientSet ? "🔔 Auto report goes to LINE when ready" : "🔕 No LINE recipient — type /notify here in your private chat with the bot"));
+    box.innerHTML = head + lines.map(function(l){ return '<div class="ready-line">'+l+'</div>'; }).join("") + '<div class="small mt">'+foot.join("<br>")+'</div>';
+  });
 }
 
 // ── Report ──
