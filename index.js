@@ -35,8 +35,8 @@ const SCHED_FILE    = path.join(DATA_DIR, "report_schedule.json");
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 });
 
-// One-time safety backups (v4: multi-bill migration, v8: branch split / internal transfer fields, v9: date fix / re-numbering)
-["payments_backup_v4.json", "payments_backup_v8.json", "payments_backup_v9.json"].forEach(function(bn) {
+// One-time safety backups (v4: multi-bill migration, v8: branch split / internal transfer fields, v9: date fix / re-numbering, v10: name memory / duplicate flags)
+["payments_backup_v4.json", "payments_backup_v8.json", "payments_backup_v9.json", "payments_backup_v10.json"].forEach(function(bn) {
   var bf = path.join(DATA_DIR, bn);
   try {
     if (fs.existsSync(DATA_FILE) && !fs.existsSync(bf)) fs.copyFileSync(DATA_FILE, bf);
@@ -72,14 +72,72 @@ function vendorCategoryMap() {
   });
   return map;
 }
-function categoryExamples(limit) {
+// withNames=false for the image reader: it once copied a past recipient onto a slip that never showed that name
+function categoryExamples(limit, withNames) {
   var ex = [];
   var l = loadPayments();
   for (var i = l.length - 1; i >= 0 && ex.length < (limit || 15); i--) {
     var p = l[i];
+    if (withNames === false) { if (p.category && p.purpose) ex.push({ purpose: p.purpose, category: p.category }); continue; }
     if (p.category && (p.purpose || p.recipient_name)) ex.push({ purpose: p.purpose || "", recipient: p.recipient_name || "", category: p.category });
   }
   return ex;
+}
+
+// ── Name memory: corrections you made to AI-read names, and Biller IDs → the vendor's real name ──
+function correctedName(data) {
+  var byRead = {}, byBiller = {};
+  loadPayments().forEach(function(p) {
+    if (p.recipient_read && p.recipient_name && p.recipient_read !== p.recipient_name) byRead[vendorKey(p.recipient_read)] = p.recipient_name;
+    if (p.biller_id && p.recipient_name) byBiller[String(p.biller_id).replace(/\D/g, "")] = p.recipient_name;
+  });
+  var biller = String(data.biller_id || "").replace(/\D/g, "");
+  if (biller.length >= 6 && byBiller[biller]) return byBiller[biller];
+  return byRead[vendorKey(data.recipient_name)] || null;
+}
+
+// ── Possible duplicates: same transaction number, or same paying account + amount + date + recipient ──
+function refKey(r) { var k = String(r || "").replace(/[^0-9a-z]/gi, "").toUpperCase(); return k.length >= 6 ? k : null; }
+function sameSlip(a, b) {
+  if (a.id === b.id) return false;
+  var ra = refKey(a.reference_number), rb = refKey(b.reference_number);
+  if (ra && rb) return ra === rb;
+  return !!a.transaction_date && a.transaction_date === b.transaction_date &&
+    Math.abs((Number(a.amount) || 0) - (Number(b.amount) || 0)) < 0.01 &&
+    normalizeBank(a.bank_from) === normalizeBank(b.bank_from) &&
+    String(a.account_from || "").replace(/\D/g, "").slice(-4) === String(b.account_from || "").replace(/\D/g, "").slice(-4) &&
+    vendorKey(a.recipient_name) === vendorKey(b.recipient_name);
+}
+// the newer slip of each pair is the suspect; dup_ok = you said "not a duplicate"
+function duplicateOf(p, list) {
+  if (p.dup_ok) return null;
+  return list.find(function(q) { return Number(q.id) < Number(p.id) && sameSlip(p, q); }) || null;
+}
+// Recipient paid before at an account one digit away (9408 vs 9498) → probably a misread
+function similarToAccount(p, list) {
+  var mine = String(p.account_to || "").replace(/\D/g, "").slice(-4);
+  if (mine.length < 4 || !p.recipient_name) return null;
+  var counts = {};
+  list.forEach(function(q) {
+    if (q.id === p.id || vendorKey(q.recipient_name) !== vendorKey(p.recipient_name) || normalizeBank(q.bank_to) !== normalizeBank(p.bank_to)) return;
+    var l = String(q.account_to || "").replace(/\D/g, "").slice(-4);
+    if (l.length === 4 && l !== mine) counts[l] = (counts[l] || 0) + 1;
+  });
+  var hit = null;
+  Object.keys(counts).forEach(function(l) {
+    var diff = 0;
+    for (var i = 0; i < 4; i++) if (l[i] !== mine[i]) diff++;
+    if (diff === 1 && (!hit || counts[l] > counts[hit])) hit = l;
+  });
+  return hit;
+}
+// Recipient read as our own / the sender's name while the money did not go to our account → reader got confused
+function recipientLooksLikeSender(p, reg) {
+  if (!p.recipient_name || p.recipient_ok) return false;
+  if (classify(p, reg || loadAccounts()).kind === "internal") return false; // our account → our account: same name is right
+  var n = normName(p.recipient_name);
+  var sn = normName(p.sender_name);
+  return !!(sn.length >= 3 && n.length >= 3 && (n === sn || n.indexOf(sn) !== -1 || sn.indexOf(n) !== -1));
 }
 
 function loadInbox() {
@@ -219,7 +277,7 @@ async function readSlip(imageBase64, caption) {
           role: "user",
           content: [
             { type: "image", source: { type: "base64", media_type: sniffMediaType(imageBase64), data: imageBase64 } },
-            { type: "text", text: "You are an expert Thai bank payment slip reader. Extract ALL details carefully.\n\nToday is " + format(new Date(), "yyyy-MM-dd") + " — slips are almost always from the last few weeks.\n\nDate formats:\n- DD/MM/YYYY or DD/MM/YY\n- DD MMM YYYY (e.g. 08 พ.ค. 2568)\n- Buddhist year (พ.ศ.) subtract 543 to get AD. 2568=2025, 2569=2026\n- 2-digit years: with an ENGLISH month (e.g. \"28 Oct 26\") the year is AD 20YY → 2026. With a THAI month (e.g. \"28 ต.ค. 69\") it is พ.ศ. 25YY → 2569 → 2026.\n- Time: HH:MM or HH:MM:SS\n\nAccounts: the slip shows FROM (sender = us) and TO (recipient). account_from / account_to = the last 4 DIGITS shown for that account (e.g. xxx-x-x8464-x → 8464). Read each digit carefully (6 vs 8, 3 vs 8, 1 vs 7).\n\nBanks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay.\nUser note: \"" + (caption || "") + "\"\nOwner's past category choices (match this style): " + JSON.stringify(categoryExamples(15)) + "\n\nReturn ONLY valid JSON:\n{\n  \"bank_from\": \"bank name or null\",\n  \"account_from\": \"last 4 digits or null\",\n  \"bank_to\": \"bank name or null\",\n  \"account_to\": \"last 4 digits or null\",\n  \"recipient_name\": \"name or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD or null\",\n  \"transaction_time\": \"HH:MM or null\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else the slip memo or what is paid to the TO/recipient — never describe it as a payment to the FROM/sender name\",\n  \"category\": \"exactly one string from this list that best fits the payment, or null: " + JSON.stringify(loadCategories()) + "\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}" }
+            { type: "text", text: "You are an expert Thai bank payment slip reader. Extract ALL details carefully.\n\nToday is " + format(new Date(), "yyyy-MM-dd") + " — slips are almost always from the last few weeks.\n\nDate formats:\n- DD/MM/YYYY or DD/MM/YY\n- DD MMM YYYY (e.g. 08 พ.ค. 2568)\n- Buddhist year (พ.ศ.) subtract 543 to get AD. 2568=2025, 2569=2026\n- 2-digit years: with an ENGLISH month (e.g. \"28 Oct 26\") the year is AD 20YY → 2026. With a THAI month (e.g. \"28 ต.ค. 69\") it is พ.ศ. 25YY → 2569 → 2026.\n- Time: HH:MM or HH:MM:SS\n\nAccounts: the slip shows FROM (sender = us) and TO (recipient). account_from / account_to = the last 4 DIGITS shown for that account (e.g. xxx-x-x8464-x → 8464). Read each digit carefully (6 vs 8, 3 vs 8, 1 vs 7). Use the digits only (XXX-XXX009-4 → 0094).\n\nNames: copy names EXACTLY as printed, letter by letter, including Thai tone marks and ์ (e.g. เช้นจ์ซี is not เซนซี). NEVER output a name that does not appear on this document — use null if unreadable.\n\nSCB \"ใบแจ้งการชำระเงิน / Payment Advice\" (bulk / payroll transfer): the recipient is \"ชื่อบัญชี / Account Name\" with \"เลขที่บัญชี/พร้อมเพย์\" in the upper block (NOT the bank name, NOT the sender); the sender is the \"Sender Details / รายละเอียดผู้จ่ายเงิน\" box; date = Transaction Date; amount = Grand Total Amount; purpose = \"Customer Transaction Reference / ข้อมูลอ้างอิงรายการ\"; reference_number = Customer Batch Reference.\nBill Payment slips: the TO side has no bank — bank_to = null, put the Biller ID in biller_id.\n\nBanks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay.\nUser note: \"" + (caption || "") + "\"\nOwner's past category choices (match this style): " + JSON.stringify(categoryExamples(15, false)) + "\n\nReturn ONLY valid JSON:\n{\n  \"bank_from\": \"bank name or null\",\n  \"account_from\": \"last 4 digits or null\",\n  \"bank_to\": \"bank name or null\",\n  \"account_to\": \"last 4 digits or null\",\n  \"sender_name\": \"FROM / sender account name or null\",\n  \"recipient_name\": \"TO name exactly as printed, or null\",\n  \"biller_id\": \"Biller ID digits or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD or null\",\n  \"transaction_time\": \"HH:MM or null\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else the slip memo or what is paid to the TO/recipient — never describe it as a payment to the FROM/sender name\",\n  \"category\": \"exactly one string from this list that best fits the payment, or null: " + JSON.stringify(loadCategories()) + "\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}" }
           ]
         }]
       },
@@ -312,6 +370,14 @@ function createSlipRecord(buf, data, source, lineMsgId) {
     var catsV = loadCategories();
     if (catsV.indexOf(data.category) === -1) data.category = null;
   }
+  if (data && (data.recipient_name || data.biller_id)) {
+    var cn = correctedName(data);
+    if (cn && cn !== data.recipient_name) {
+      console.log("Name memory:", data.recipient_name, "→", cn);
+      data.recipient_read = data.recipient_name;
+      data.recipient_name = cn;
+    }
+  }
   if (data && data.recipient_name) {
     var vmNew = vendorCategoryMap();
     var vk = vendorKey(data.recipient_name);
@@ -372,6 +438,13 @@ function slipReply(rec) {
       ? "🆕 " + c.from.bank + " ****" + c.from.last4 + " — หรืออ่านผิดจาก ****" + sim.last4 + "? ถ้าผิด แก้เลขบัญชีใน /app (Edit)"
       : "🆕 บัญชีใหม่ " + c.from.bank + " ****" + c.from.last4 + " — ตั้งสาขาที่ /app → Report");
   }
+  var allR = loadPayments();
+  var dup = duplicateOf(rec, allR);
+  if (dup) lines.push("⚠️ อาจซ้ำกับ #" + showId(dup) + " (" + (dup.transaction_date || "") + " " + baht(dup.amount) + ") — เช็กใน /app → Report");
+  var simTo = similarToAccount(rec, allR);
+  if (simTo) lines.push("⚠️ บัญชีปลายทาง ****" + String(rec.account_to).replace(/\D/g, "").slice(-4) + " — เคยโอนให้ผู้รับนี้ที่ ****" + simTo + " อ่านผิด?");
+  if (recipientLooksLikeSender(rec, reg)) lines.push("⚠️ ผู้รับไม่ชัด (อ่านได้ชื่อเดียวกับผู้โอน) — แก้ชื่อผู้รับใน /app");
+  if (rec.recipient_read) lines.push("✏️ ชื่อผู้รับแก้ตามที่เคยแก้ไว้: " + rec.recipient_read + " → " + rec.recipient_name);
   if (rec.date_autofixed_from) lines.push("📅 ปีบนสลิปอ่านได้ " + rec.date_autofixed_from + " → แก้เป็น " + rec.transaction_date + " (เช็กได้ใน /app)");
   lines.push("📎 Match bills at " + BASE_URL + "/app");
   return lines.join("\n");
@@ -485,6 +558,7 @@ function classify(p, reg) {
   var to = findAccount(reg, p.bank_to, p.account_to);
   if (from && from.type === "external") from = null;
   if (to && to.type === "external") to = null;
+  if (to && to.type === "personal") to = null; // paying a person (salary / reimbursement) is a real expense
   var kind = "expense", via = null;
   if (p.internal === true) { kind = "internal"; via = "manual"; }
   else if (to && to.type === "petty_cash") { kind = "petty_cash"; via = "account"; }
@@ -629,7 +703,14 @@ function checkMonth(y, m) {
   r.unassigned = Object.keys(ua);
   r.noDate = all.filter(function(p) { return !p.transaction_date; }).map(showId);
   r.suspectDate = suspectDates(all);
-  r.ready = !r.missingBill.length && !r.noCategory.length && !r.pendingInternal.length && !r.unassigned.length && !r.noDate.length && !r.suspectDate.length;
+  r.duplicates = [];
+  r.recipientUnclear = [];
+  rows.forEach(function(p) {
+    var d = duplicateOf(p, all);
+    if (d) r.duplicates.push({ id: p.id, display_id: showId(p), of: showId(d), date: p.transaction_date, amount: Number(p.amount) || 0, recipient: p.recipient_name || "" });
+    if (recipientLooksLikeSender(p, reg)) r.recipientUnclear.push(showId(p));
+  });
+  r.ready = !r.missingBill.length && !r.noCategory.length && !r.pendingInternal.length && !r.unassigned.length && !r.noDate.length && !r.suspectDate.length && !r.duplicates.length && !r.recipientUnclear.length;
   return r;
 }
 
@@ -652,6 +733,8 @@ function readinessText(r) {
   if (r.missingBill.length) lines.push("⚠️ ขาดบิล/note: " + r.missingBill.length + " — " + idList(r.missingBill));
   if (r.noCategory.length) lines.push("🏷 ยังไม่จัดหมวด: " + r.noCategory.length + " — " + idList(r.noCategory));
   if (r.noDate.length) lines.push("📅 ไม่มีวันที่: " + r.noDate.length + " — " + idList(r.noDate));
+  if (r.duplicates.length) lines.push("♊ อาจซ้ำ: " + r.duplicates.length + " — " + r.duplicates.slice(0, 6).map(function(d) { return "#" + d.display_id + "=#" + d.of; }).join(" ") + (r.duplicates.length > 6 ? " +" + (r.duplicates.length - 6) : ""));
+  if (r.recipientUnclear.length) lines.push("❓ ผู้รับไม่ชัด: " + r.recipientUnclear.length + " — " + idList(r.recipientUnclear));
   if (r.suspectDate.length) lines.push("📅 ปีน่าสงสัย (ห่างจากวันอัปโหลด): " + r.suspectDate.length + " — " + idList(r.suspectDate.map(function(x) { return x.display_id; })));
   if (r.unassigned.length) lines.push("🆕 บัญชียังไม่ระบุสาขา: " + r.unassigned.slice(0, 5).join(", ") + (r.unassigned.length > 5 ? " +" + (r.unassigned.length - 5) : ""));
   if (r.pendingInternal.length) lines.push("🔁 รอยืนยันโอนภายใน: " + r.pendingInternal.length + " — " + idList(r.pendingInternal));
@@ -1238,6 +1321,9 @@ app.get("/api/slips", auth, function(req, res) {
       alloc: c.alloc, pending: c.pending, needsBill: c.needsBill,
       newAcct: !!(c.from && !c.from.branch),
       suggestions: c.kind === "internal" ? linkSuggestions(p, all, reg) : [],
+      duplicateOf: (function() { var d = duplicateOf(p, all); return d ? showId(d) : null; })(),
+      toSimilar: similarToAccount(p, all),
+      recipientUnclear: recipientLooksLikeSender(p, reg),
       linkedDisplay: p.linked_to ? (function() { var e = all.find(function(q) { return String(q.id) === String(p.linked_to); }); return e ? showId(e) : null; })() : null
     } });
   }));
@@ -1666,7 +1752,11 @@ app.patch("/api/slips/:id", auth, function(req, res) {
   var list = loadPayments();
   var idx = list.findIndex(function(p) { return String(p.id) === String(req.params.id); });
   if (idx === -1) return res.status(404).json({ error: "not found" });
-  var allowed = ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number","category","evidence_note","date_ok"];
+  var allowed = ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number","category","evidence_note","date_ok","dup_ok","recipient_ok"];
+  var newName = req.body.recipient_name;
+  if (newName !== undefined && newName && list[idx].recipient_name && newName !== list[idx].recipient_name && !list[idx].recipient_read) {
+    list[idx].recipient_read = list[idx].recipient_name; // what the AI read — used to auto-correct the same misread next time
+  }
   allowed.forEach(function(f) {
     if (req.body[f] !== undefined) list[idx][f] = req.body[f];
   });
@@ -1734,4 +1824,4 @@ if (require.main === module) {
   });
 }
 // exported for offline test scripts only
-module.exports = { app: app, client: client, classify: classify, loadAccounts: loadAccounts, checkMonth: checkMonth, monthTotals: monthTotals, makeReport: makeReport, scheduleTick: scheduleTick, linkSuggestions: linkSuggestions, nameMatchesAlias: nameMatchesAlias, readinessText: readinessText, reportReadyText: reportReadyText, suggestYearFix: suggestYearFix, suspectDates: suspectDates };
+module.exports = { app: app, client: client, classify: classify, loadAccounts: loadAccounts, checkMonth: checkMonth, monthTotals: monthTotals, makeReport: makeReport, scheduleTick: scheduleTick, linkSuggestions: linkSuggestions, nameMatchesAlias: nameMatchesAlias, readinessText: readinessText, reportReadyText: reportReadyText, suggestYearFix: suggestYearFix, suspectDates: suspectDates, duplicateOf: duplicateOf, similarToAccount: similarToAccount, correctedName: correctedName };
