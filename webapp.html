@@ -109,6 +109,28 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
 .acct-row input,.acct-row select{padding:8px;font-size:13px;}
 .ready-ok{color:var(--green);font-weight:700;}
 .ready-line{font-size:13px;padding:4px 0;border-bottom:1px solid var(--border);}
+.rdy-sec{margin-top:14px;}
+.rdy-title{font-weight:700;font-size:14px;margin-bottom:4px;}
+.rdy-row{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--border);}
+.rdy-thumb{width:64px;height:84px;object-fit:cover;border-radius:8px;background:#F7F9FF;border:1px solid var(--border);cursor:zoom-in;flex:none;}
+.rdy-noimg{display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text2);cursor:default;}
+.rdy-info{flex:1;min-width:0;font-size:13px;}
+.rdy-id{font-weight:700;color:var(--blue);}
+.rdy-sel{padding:6px 8px;font-size:12px;border-radius:8px;max-width:100%;}
+.rdy-dup{border:1px solid var(--border);border-radius:12px;padding:10px;margin-bottom:10px;background:#FAFBFF;}
+.rdy-cols{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.rdy-big{width:100%;height:220px;object-fit:contain;background:#fff;border:1px solid var(--border);border-radius:8px;cursor:zoom-in;margin-top:4px;}
+.rdy-cmp{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;table-layout:fixed;}
+.rdy-cmp th{text-align:left;width:30%;padding:4px;font-weight:600;}
+.rdy-cmp td{padding:4px;word-break:break-word;}
+.rdy-cmp tr.diff{background:#FFEBEE;}
+.rdy-cmp tr.diff td{color:var(--red);font-weight:700;}
+.rdy-cmp tr.same{background:#F1F8E9;}
+.rdy-verdict{margin-top:8px;font-size:13px;font-weight:700;padding:6px 8px;border-radius:8px;}
+.rdy-verdict.bad{background:#FFEBEE;color:var(--red);}
+.rdy-verdict.ok{background:#E8F5E9;color:var(--green);}
+.sv-img{width:100%;max-height:360px;object-fit:contain;background:#F7F9FF;border-radius:8px;cursor:zoom-in;}
+.sv-tbl tr{border-bottom:1px solid var(--border);}
 </style>
 </head>
 <body>
@@ -297,6 +319,15 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
       <button class="btn btn-blue" style="flex:1" onclick="saveEdit()">Save</button>
       <button class="btn btn-gray" style="flex:1" onclick="closeEdit()">Cancel</button>
     </div>
+  </div>
+</div>
+
+<!-- slip view (from # links) -->
+<div id="slipViewModal" class="modal" onclick="if(event.target===this)closeSlipView()">
+  <div class="modal-box">
+    <h3 id="svTitle">🧾 Slip</h3>
+    <div id="svBody"></div>
+    <div class="row mt" id="svActions"></div>
   </div>
 </div>
 
@@ -617,11 +648,12 @@ function clsChips(p) {
   if (c.alloc && c.alloc.length) {
     out += '<span class="tag tag-br">🏢 '+c.alloc.map(function(a){ return esc(a.branch)+(c.alloc.length>1?" "+fmtB(a.amount):""); }).join(" · ")+'</span> ';
   }
-  if (c.newAcct) out += '<span class="tag tag-new">🆕 account branch not set</span> ';
+  if (c.noFromAcct) out += '<span class="tag tag-new">⚠️ sender account number unreadable — fix "From Acct" with ✏️ Edit</span> ';
+  else if (c.newAcct) out += '<span class="tag tag-new">🆕 account branch not set</span> ';
   if (c.duplicateOf) out += '<span class="tag tag-new">♊ maybe duplicate of #'+esc(c.duplicateOf)+'</span> ';
   if (c.toSimilar) out += '<span class="tag tag-new">⚠️ to ****'+esc(String(p.account_to||"").replace(/\D/g,"").slice(-4))+' — usually ****'+esc(c.toSimilar)+'?</span> ';
   if (c.recipientUnclear) out += '<span class="tag tag-new">❓ recipient unclear — fix with ✏️ Edit</span> ';
-  if (p.recipient_read) out += '<span class="tag tag-note">✏️ read as '+esc(p.recipient_read)+'</span>';
+
   return out;
 }
 function clsActions(p) {
@@ -639,7 +671,8 @@ function clsActions(p) {
     } else {
       (c.suggestions||[]).forEach(function(s) {
         html += '<div class="suggest">🤖 '+esc(c.fromBranch)+' paying its share ('+s.pct+'%) of <b>#'+esc(s.display_id)+'</b> '+fmtB(s.amount)+' · '+esc(s.date)+' · '+esc(s.purpose||s.recipient)+'?'+
-          '<div class="row mt"><button class="btn btn-green btn-sm" onclick="linkTo('+p.id+','+s.id+')">✅ Yes — split '+esc(c.toBranch)+' '+fmtB(s.amount-p.amount)+' / '+esc(c.fromBranch)+' '+fmtB(p.amount)+'</button></div></div>';
+          '<div class="row mt"><button class="btn btn-green btn-sm" onclick="linkTo('+p.id+','+s.id+')">✅ Yes — split '+esc(c.toBranch)+' '+fmtB(s.amount-p.amount)+' / '+esc(c.fromBranch)+' '+fmtB(p.amount)+'</button>'+
+          '<button class="btn btn-gray btn-sm" onclick="dismissLink('+p.id+','+s.id+')">❌ No, not a share</button></div></div>';
       });
     }
     if (c.via === "manual") html += '<div class="row mt"><button class="btn btn-gray btn-sm" onclick="setInternal('+p.id+',null)">↩️ Back to automatic</button></div>';
@@ -652,6 +685,11 @@ function setInternal(id, v) {
   api("POST","/api/slips/"+id+"/internal",{value:v}).then(function(d){
     if (d.ok) { toast(v===true?"🔁 Marked internal":(v===false?"✅ Kept as expense":"↩️ Automatic")); loadSlips(); loadMatch(); }
     else toast("❌ "+(d.error||"error"));
+  });
+}
+function dismissLink(id, expenseId) {
+  api("POST","/api/slips/"+id+"/link-dismiss",{expenseId:expenseId}).then(function(d){
+    if (d.ok) { toast("Hidden — won't suggest again"); loadSlips(); } else toast("❌ "+(d.error||"error"));
   });
 }
 function linkTo(id, expenseId) {
@@ -729,7 +767,7 @@ function openBills(id) {
   renderBillsModal();
   document.getElementById("billsModal").classList.add("open");
 }
-function closeBills(){ document.getElementById("billsModal").classList.remove("open"); billsSlipId=null; loadSlips(); loadMatch(); loadInbox(); }
+function closeBills(){ document.getElementById("billsModal").classList.remove("open"); billsSlipId=null; loadSlips(); loadMatch(); loadInbox(); refreshReadinessIfVisible(); }
 function renderBillsModal() {
   var p = slipsCache.find(function(x){ return x.id===billsSlipId; });
   if (!p) { closeBills(); return; }
@@ -851,6 +889,7 @@ function openEdit(id) {
     '<div class="field"><label>Internal transfer?</label><select id="ef_internal" data-was="'+iv+'">'+intOpts+'</select></div>' + fields.map(function(f) {
     return '<div class="field"><label>'+f[1]+'</label><input id="ef_'+f[0]+'" type="'+f[2]+'" value="'+((p[f[0]]!==null&&p[f[0]]!==undefined)?esc(p[f[0]]):"")+'"></div>';
   }).join("");
+  if (p.recipient_read && p.recipient_read !== p.recipient_name) document.getElementById("editFields").insertAdjacentHTML("afterbegin", '<div class="small" style="margin-bottom:8px">✏️ AI first read the recipient as "'+esc(p.recipient_read)+'" — remembered, so the same misread is corrected automatically next time.</div>');
   if (p._cls && p._cls.recipientUnclear) document.getElementById("editFields").insertAdjacentHTML("afterbegin", '<div class="suggest">❓ The recipient was read as the sender\'s name. Fix "Recipient" below, or <a href="#" onclick="markSlip('+p.id+',{recipient_ok:true});closeEdit();return false">it is correct</a>.</div>');
   document.getElementById("editModal").classList.add("open");
 }
@@ -867,7 +906,7 @@ function saveEdit() {
   var id = editId;
   api("PATCH","/api/slips/"+id, body).then(function(){
     if (ie.value !== ie.getAttribute("data-was")) return api("POST","/api/slips/"+id+"/internal",{value: ie.value==="yes"?true:(ie.value==="no"?false:null)});
-  }).then(function(){ toast("✅ Saved"); closeEdit(); loadSlips(); loadMatch(); });
+  }).then(function(){ toast("✅ Saved"); closeEdit(); loadSlips(); loadMatch(); refreshReadinessIfVisible(); });
 }
 
 // ── Match tab ──
@@ -1190,36 +1229,132 @@ function runScan() {
     else toast("❌ "+(d.error||"error"));
   }).catch(function(){ btn.disabled = false; btn.textContent = "🔍 Scan for internal transfers since Sep 2026"; toast("❌ failed — check API credits"); });
 }
+// ── Readiness: every problem shows the slip itself and can be fixed right here ──
+var READY = null;
+function slipLabel(p) { return p.display_id ? "#"+p.display_id : (p.transaction_date || "no date"); }
+function rdyFind(id) { return READY && READY.slips[id]; }
+// make records from the check usable by the existing Edit / Bills dialogs
+function rdyCache(p) { if (p && !slipsCache.find(function(x){ return x.id===p.id; })) slipsCache.push(p); }
+function rdyEdit(id) { rdyCache(rdyFind(id)); openEdit(id); }
+function rdyBills(id) { rdyCache(rdyFind(id)); openBills(id); }
+function readinessVisible() { return !document.getElementById("view-report").classList.contains("hidden"); }
+function refreshReadinessIfVisible() { if (readinessVisible() && READY) loadReadiness(); }
+
+function slipRow(p, actions) {
+  return '<div class="rdy-row">'+
+    (p.imageFile ? '<img class="rdy-thumb" src="/slips/'+esc(p.imageFile)+'" onclick="viewImg(this.src)">' : '<div class="rdy-thumb rdy-noimg">no image</div>')+
+    '<div class="rdy-info">'+
+      '<div><a href="#" class="rdy-id" onclick="openSlipView('+p.id+');return false">'+esc(slipLabel(p))+'</a> <span class="amt">'+fmtB(p.amount)+'</span></div>'+
+      '<div class="small">'+esc(p.transaction_date||"⚠️ no date")+' '+esc(p.transaction_time||"")+' · '+esc(p.bank_from||"?")+' ****'+esc(p.account_from||"????")+'</div>'+
+      '<div class="small">→ <b>'+esc(p.recipient_name||"?")+'</b>'+(p.purpose?' · '+esc(p.purpose):'')+'</div>'+
+      (actions ? '<div class="row" style="margin-top:6px">'+actions+'</div>' : '')+
+    '</div></div>';
+}
+function catSelect(p) {
+  return '<select class="rdy-sel" onchange="if(this.value)markSlip('+p.id+',{category:this.value})"><option value="">🏷 choose category…</option>'+
+    CATS.map(function(c){ return '<option value="'+esc(c)+'">'+esc(c)+'</option>'; }).join("")+'</select>';
+}
+function rdySection(title, hint, rows) {
+  if (!rows.length) return "";
+  return '<div class="rdy-sec"><div class="rdy-title">'+title+' <span class="badge">'+rows.length+'</span></div>'+(hint?'<div class="small" style="margin-bottom:6px">'+hint+'</div>':'')+rows.join("")+'</div>';
+}
+// side-by-side comparison: same fields ✅, different ❗
+function dupCard(a, b) {
+  var tm = function(x){ return (x.transaction_date||"")+" "+(x.transaction_time||""); };
+  var acct = function(x){ return (x.bank_from||"?")+" ****"+String(x.account_from||"").replace(/\D/g,"").slice(-4); };
+  var fields = [
+    ["Date / time", tm(a), tm(b)],
+    ["Amount", fmtB(a.amount), fmtB(b.amount)],
+    ["From", acct(a), acct(b)],
+    ["Recipient", a.recipient_name||"", b.recipient_name||""],
+    ["Reference", a.reference_number||"—", b.reference_number||"—"],
+    ["Purpose", a.purpose||"", b.purpose||""]
+  ];
+  var diff = fields.filter(function(f){ return f[1].trim().toLowerCase()!==f[2].trim().toLowerCase(); }).map(function(f){ return f[0]; });
+  var verdict = !diff.length ? '<div class="rdy-verdict bad">All fields match → very likely the same payment entered twice</div>'
+    : (diff.length===1 && diff[0]==="Purpose" ? '<div class="rdy-verdict bad">Only the purpose text differs → probably the same payment</div>'
+    : '<div class="rdy-verdict ok">Different: '+diff.map(esc).join(", ")+' → maybe two real payments — check the pictures</div>');
+  var img = function(x){ return x.imageFile ? '<img class="rdy-big" src="/slips/'+esc(x.imageFile)+'" onclick="viewImg(this.src)">' : '<div class="rdy-big rdy-noimg">no image</div>'; };
+  return '<div class="rdy-dup">'+
+    '<div class="rdy-cols"><div><div class="small"><b>Newer</b> · <a href="#" onclick="openSlipView('+a.id+');return false">'+esc(slipLabel(a))+'</a></div>'+img(a)+'</div>'+
+    '<div><div class="small"><b>Older</b> · <a href="#" onclick="openSlipView('+b.id+');return false">'+esc(slipLabel(b))+'</a></div>'+img(b)+'</div></div>'+
+    '<table class="rdy-cmp">'+fields.map(function(f){
+      var same = f[1].trim().toLowerCase()===f[2].trim().toLowerCase();
+      return '<tr class="'+(same?'same':'diff')+'"><th>'+(same?'✅':'❗')+' '+f[0]+'</th><td>'+esc(f[1])+'</td><td>'+esc(f[2])+'</td></tr>';
+    }).join("")+'</table>'+verdict+
+    '<div class="row mt"><button class="btn btn-red btn-sm" onclick="delDup('+a.id+',\''+esc(slipLabel(a))+'\')">🗑 Delete the newer one</button>'+
+    '<button class="btn btn-gray btn-sm" onclick="markSlip('+a.id+',{dup_ok:true})">✅ Not a duplicate — keep both</button></div></div>';
+}
 function loadReadiness() {
   var y = document.getElementById("repYear").value, m = document.getElementById("repMonth").value;
   var box = document.getElementById("readyBox");
-  box.innerHTML = '<div class="small">Checking…</div>';
+  if (!READY) box.innerHTML = '<div class="small">Checking…</div>';
   api("GET","/api/check?year="+y+"&month="+m).then(function(r) {
-    var ids = function(a){ return a.slice(0,12).map(function(x){ return "#"+esc(x); }).join(" ")+(a.length>12?" +"+(a.length-12):""); };
-    var lines = [];
-    if (r.missingBill.length) lines.push("⚠️ Missing bill / note: <b>"+r.missingBill.length+"</b> — "+ids(r.missingBill));
-    if (r.noCategory.length) lines.push("🏷 No category: <b>"+r.noCategory.length+"</b> — "+ids(r.noCategory));
-    if (r.noDate.length) lines.push("📅 No date: <b>"+r.noDate.length+"</b> — "+ids(r.noDate));
-    (r.duplicates||[]).forEach(function(x) {
-      lines.push("♊ #"+esc(x.display_id)+" looks like a duplicate of #"+esc(x.of)+" — "+esc(x.date||"")+" "+fmtB(x.amount)+" "+esc(x.recipient)+
-        '<div class="row mt"><button class="btn btn-red btn-sm" onclick="delDup('+x.id+',\''+esc(x.display_id)+'\')">🗑 Delete #'+esc(x.display_id)+'</button>'+
-        '<button class="btn btn-gray btn-sm" onclick="markSlip('+x.id+',{dup_ok:true})">Not a duplicate</button></div>');
-    });
-    if ((r.recipientUnclear||[]).length) lines.push("❓ Recipient unclear (read as the sender's name): <b>"+r.recipientUnclear.length+"</b> — "+ids(r.recipientUnclear)+" · fix the name with ✏️ Edit on the Slips tab");
-    (r.suspectDate||[]).forEach(function(x) {
-      lines.push("📅 #"+esc(x.display_id)+" dated <b>"+esc(x.date)+"</b> but uploaded "+(x.savedAt?esc(x.savedAt.slice(0,10)):"?")+" — year misread?"+
-        '<div class="row mt">'+(x.suggested?'<button class="btn btn-green btn-sm" onclick="fixDate('+x.id+',\''+esc(x.suggested)+'\')">✅ Change to '+esc(x.suggested)+'</button>':'')+
-        '<button class="btn btn-gray btn-sm" onclick="dateOk('+x.id+')">Date is correct</button></div>');
-    });
-    if (r.unassigned.length) lines.push("🆕 Account branch not set: "+r.unassigned.map(esc).join(", "));
-    if (r.pendingInternal.length) lines.push("🔁 Internal transfer to confirm: <b>"+r.pendingInternal.length+"</b> — "+ids(r.pendingInternal));
-    var head = r.ready ? '<div class="ready-ok">✅ Ready — '+r.count+' transactions</div>' : '<div style="font-weight:700;color:var(--orange)">⏳ Not ready yet</div>';
+    READY = r;
+    var S = function(id){ return r.slips[id]; };
+    var it = r.items || {};
+    var secs = [];
+    secs.push(rdySection("♊ Possible duplicates", "Compare the two pictures and the fields — ❗ marks what is different.",
+      (it.duplicates||[]).filter(function(d){ return S(d[0]) && S(d[1]); }).map(function(d){ return dupCard(S(d[0]), S(d[1])); })));
+    secs.push(rdySection("⚠️ Missing bill / note", "Tap the # to see the slip. Add the bill, write a note, or mark that no bill exists.",
+      (it.missingBill||[]).map(S).filter(Boolean).map(function(p){ return slipRow(p,
+        '<button class="btn btn-orange btn-sm" onclick="rdyBills('+p.id+')">📄 Add bill / 📝 note</button>'+
+        '<button class="btn btn-gray btn-sm" onclick="rdyNoBill('+p.id+')">🚫 No bill expected</button>'); })));
+    secs.push(rdySection("🏷 No category", "", (it.noCategory||[]).map(S).filter(Boolean).map(function(p){ return slipRow(p, catSelect(p)); })));
+    secs.push(rdySection("🔁 Internal transfer?", "Money to a name like our company — is it a transfer between our own accounts?",
+      (it.pendingInternal||[]).map(S).filter(Boolean).map(function(p){ return slipRow(p,
+        '<button class="btn btn-green btn-sm" onclick="rdyInternal('+p.id+',true)">✅ Yes, internal</button>'+
+        '<button class="btn btn-gray btn-sm" onclick="rdyInternal('+p.id+',false)">❌ No, real expense</button>'); })));
+    secs.push(rdySection("❓ Recipient unclear", "The recipient was read as the sender's own name.",
+      (it.recipientUnclear||[]).map(S).filter(Boolean).map(function(p){ return slipRow(p,
+        '<button class="btn btn-blue btn-sm" onclick="rdyEdit('+p.id+')">✏️ Fix recipient</button>'+
+        '<button class="btn btn-gray btn-sm" onclick="markSlip('+p.id+',{recipient_ok:true})">It is correct</button>'); })));
+    secs.push(rdySection("📅 Year looks wrong", "Slip date is far from the day it was uploaded.",
+      (r.suspectDate||[]).filter(function(x){ return S(x.id); }).map(function(x){ var p = S(x.id); return slipRow(p,
+        '<span class="small">uploaded '+esc((x.savedAt||"").slice(0,10))+'</span>'+
+        (x.suggested?'<button class="btn btn-green btn-sm" onclick="fixDate('+p.id+',\''+esc(x.suggested)+'\')">✅ Change to '+esc(x.suggested)+'</button>':'')+
+        '<button class="btn btn-gray btn-sm" onclick="dateOk('+p.id+')">Date is correct</button>'); })));
+    secs.push(rdySection("📅 No date", "", (it.noDate||[]).map(S).filter(Boolean).map(function(p){ return slipRow(p,
+        '<button class="btn btn-blue btn-sm" onclick="rdyEdit('+p.id+')">✏️ Add date</button>'); })));
+    if (r.unassigned.length) secs.push('<div class="rdy-sec"><div class="rdy-title">🆕 Account branch not set <span class="badge">'+r.unassigned.length+'</span></div><div class="small">'+r.unassigned.map(esc).join("<br>")+'<br>→ set the branch in 🏦 Accounts below (or fix "From Acct" with ✏️ Edit if it was misread)</div></div>');
+    var head = r.ready ? '<div class="ready-ok">✅ Ready — '+r.count+' transactions</div>' : '<div style="font-weight:700;color:var(--orange)">⏳ Not ready yet — fix the items below</div>';
     var foot = [];
     if (r.inbox) foot.push("📥 "+r.inbox+" image(s) still in inbox (doesn't block)");
     foot.push(r.sentAt ? "📨 Auto report sent "+new Date(r.sentAt).toLocaleString("th-TH") : (r.recipientSet ? "🔔 Auto report goes to LINE when ready" : "🔕 No LINE recipient — type /notify here in your private chat with the bot"));
-    box.innerHTML = head + lines.map(function(l){ return '<div class="ready-line">'+l+'</div>'; }).join("") + '<div class="small mt">'+foot.join("<br>")+'</div>';
+    box.innerHTML = head + secs.join("") + '<div class="small mt">'+foot.join("<br>")+'</div>';
   });
 }
+function rdyNoBill(id) {
+  api("POST","/api/slips/"+id+"/no-bill",{expected:true}).then(function(){ toast("🚫 Marked: no bill expected"); loadReadiness(); loadMatch(); });
+}
+function rdyInternal(id, v) {
+  api("POST","/api/slips/"+id+"/internal",{value:v}).then(function(){ toast(v?"🔁 Internal":"✅ Kept as expense"); loadReadiness(); loadSlips(); });
+}
+
+// ── Slip view: picture + details + bills, opened from any # link ──
+function openSlipView(id) {
+  var p = rdyFind(id) || slipsCache.find(function(x){ return x.id===id; });
+  if (!p) return;
+  rdyCache(p);
+  var bl = bills(p);
+  var row = function(k, v){ return v ? '<tr><th>'+k+'</th><td>'+esc(v)+'</td></tr>' : ''; };
+  document.getElementById("svTitle").textContent = slipLabel(p)+" — "+fmtB(p.amount);
+  document.getElementById("svBody").innerHTML =
+    (p.imageFile ? '<img class="sv-img" src="/slips/'+esc(p.imageFile)+'" onclick="viewImg(this.src)">' : '<div class="small">No slip image</div>')+
+    '<table class="rdy-cmp sv-tbl">'+
+      row("Date", (p.transaction_date||"")+" "+(p.transaction_time||""))+row("From", (p.bank_from||"")+" ****"+(p.account_from||""))+
+      row("To", (p.recipient_name||"")+(p.account_to?" · ****"+p.account_to:""))+row("Purpose", p.purpose)+row("Category", p.category)+
+      row("Reference", p.reference_number)+row("Note", p.evidence_note)+(p.no_bill_expected?row("Bill","➖ no bill expected"):"")+
+    '</table>'+
+    '<div class="section-title">📄 Bills ('+bl.length+')</div>'+
+    (bl.length ? '<div class="bill-thumbs">'+bl.map(function(f){ return '<div class="bill-thumb"><img src="/bills/'+esc(f)+'" onclick="viewImg(this.src)"></div>'; }).join("")+'</div>' : '<div class="small">No bill attached</div>');
+  document.getElementById("svActions").innerHTML =
+    '<button class="btn btn-orange btn-sm" onclick="closeSlipView();rdyBills('+p.id+')">📄 Bills / 📝 note</button>'+
+    '<button class="btn btn-blue btn-sm" onclick="closeSlipView();rdyEdit('+p.id+')">✏️ Edit</button>'+
+    '<button class="btn btn-gray btn-sm" onclick="closeSlipView()">Close</button>';
+  document.getElementById("slipViewModal").classList.add("open");
+}
+function closeSlipView() { document.getElementById("slipViewModal").classList.remove("open"); }
 
 function fixDate(id, d) {
   api("PATCH","/api/slips/"+id,{transaction_date:d}).then(function(p){
@@ -1231,8 +1366,8 @@ function markSlip(id, body) {
   api("PATCH","/api/slips/"+id,body).then(function(){ toast("✅ Saved"); loadReadiness(); loadSlips(); });
 }
 function delDup(id, did) {
-  if (!confirm("Delete #"+did+" (the duplicate)? The original stays.")) return;
-  api("DELETE","/api/slips/"+id).then(function(){ toast("🗑 Deleted #"+did); loadReadiness(); loadSlips(); loadMatch(); });
+  if (!confirm("Delete "+did+" (the newer copy)? The older one stays.")) return;
+  api("DELETE","/api/slips/"+id).then(function(){ toast("🗑 Deleted "+did); loadReadiness(); loadSlips(); loadMatch(); });
 }
 function dateOk(id) {
   api("PATCH","/api/slips/"+id,{date_ok:true}).then(function(){ toast("✅ Kept"); loadReadiness(); });
