@@ -35,8 +35,8 @@ const SCHED_FILE    = path.join(DATA_DIR, "report_schedule.json");
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 });
 
-// One-time safety backups (v4: multi-bill migration, v8: branch split / internal transfer fields)
-["payments_backup_v4.json", "payments_backup_v8.json"].forEach(function(bn) {
+// One-time safety backups (v4: multi-bill migration, v8: branch split / internal transfer fields, v9: date fix / re-numbering)
+["payments_backup_v4.json", "payments_backup_v8.json", "payments_backup_v9.json"].forEach(function(bn) {
   var bf = path.join(DATA_DIR, bn);
   try {
     if (fs.existsSync(DATA_FILE) && !fs.existsSync(bf)) fs.copyFileSync(DATA_FILE, bf);
@@ -219,7 +219,7 @@ async function readSlip(imageBase64, caption) {
           role: "user",
           content: [
             { type: "image", source: { type: "base64", media_type: sniffMediaType(imageBase64), data: imageBase64 } },
-            { type: "text", text: "You are an expert Thai bank payment slip reader. Extract ALL details carefully.\n\nThai date formats:\n- DD/MM/YYYY or DD/MM/YY\n- DD MMM YYYY (e.g. 08 พ.ค. 2568)\n- Buddhist year (พ.ศ.) subtract 543 to get AD. 2568=2025, 2569=2026\n- Time: HH:MM or HH:MM:SS\n\nBanks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay.\nUser note: \"" + (caption || "") + "\"\nOwner's past category choices (match this style): " + JSON.stringify(categoryExamples(15)) + "\n\nReturn ONLY valid JSON:\n{\n  \"bank_from\": \"bank name or null\",\n  \"account_from\": \"last 4 digits or null\",\n  \"bank_to\": \"bank name or null\",\n  \"account_to\": \"last 4 digits or null\",\n  \"recipient_name\": \"name or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD or null\",\n  \"transaction_time\": \"HH:MM or null\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else infer from recipient\",\n  \"category\": \"exactly one string from this list that best fits the payment, or null: " + JSON.stringify(loadCategories()) + "\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}" }
+            { type: "text", text: "You are an expert Thai bank payment slip reader. Extract ALL details carefully.\n\nToday is " + format(new Date(), "yyyy-MM-dd") + " — slips are almost always from the last few weeks.\n\nDate formats:\n- DD/MM/YYYY or DD/MM/YY\n- DD MMM YYYY (e.g. 08 พ.ค. 2568)\n- Buddhist year (พ.ศ.) subtract 543 to get AD. 2568=2025, 2569=2026\n- 2-digit years: with an ENGLISH month (e.g. \"28 Oct 26\") the year is AD 20YY → 2026. With a THAI month (e.g. \"28 ต.ค. 69\") it is พ.ศ. 25YY → 2569 → 2026.\n- Time: HH:MM or HH:MM:SS\n\nAccounts: the slip shows FROM (sender = us) and TO (recipient). account_from / account_to = the last 4 DIGITS shown for that account (e.g. xxx-x-x8464-x → 8464). Read each digit carefully (6 vs 8, 3 vs 8, 1 vs 7).\n\nBanks: SCB, Krungthai (KTB), Bangkok Bank (BBL), Kasikorn (KBank), Krungsri (BAY), TMB, GSB, PromptPay.\nUser note: \"" + (caption || "") + "\"\nOwner's past category choices (match this style): " + JSON.stringify(categoryExamples(15)) + "\n\nReturn ONLY valid JSON:\n{\n  \"bank_from\": \"bank name or null\",\n  \"account_from\": \"last 4 digits or null\",\n  \"bank_to\": \"bank name or null\",\n  \"account_to\": \"last 4 digits or null\",\n  \"recipient_name\": \"name or null\",\n  \"amount\": 0.00,\n  \"transaction_date\": \"YYYY-MM-DD or null\",\n  \"transaction_time\": \"HH:MM or null\",\n  \"reference_number\": \"ref or null\",\n  \"purpose\": \"use user note if given, else the slip memo or what is paid to the TO/recipient — never describe it as a payment to the FROM/sender name\",\n  \"category\": \"exactly one string from this list that best fits the payment, or null: " + JSON.stringify(loadCategories()) + "\",\n  \"slip_type\": \"mobile_banking or internet_banking or prompt_pay\"\n}" }
           ]
         }]
       },
@@ -270,7 +270,44 @@ async function getImage(client, messageId) {
 }
 
 // ── Create records ─────────────────────────────────────────────────────────
+// ── Date sanity: a slip dated far from its upload time almost always has a misread year ──
+var DATE_PAST_DAYS = 183, DATE_FUTURE_DAYS = 7;
+function dateLooksWrong(dateStr, refMs) {
+  var t = Date.parse(dateStr || "");
+  if (isNaN(t)) return false;
+  return t > refMs + DATE_FUTURE_DAYS * 86400000 || t < refMs - DATE_PAST_DAYS * 86400000;
+}
+// Same day/month, year moved to the one closest to the upload time (null if nothing fits)
+function suggestYearFix(dateStr, refMs) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr || "");
+  if (!m) return null;
+  var refY = new Date(refMs).getUTCFullYear();
+  var best = null;
+  [refY - 1, refY, refY + 1].forEach(function(y) {
+    var cand = y + "-" + m[2] + "-" + m[3];
+    if (cand === dateStr || dateLooksWrong(cand, refMs)) return;
+    var d = Math.abs(Date.parse(cand) - refMs);
+    if (!best || d < best.d) best = { date: cand, d: d };
+  });
+  return best ? best.date : null;
+}
+function suspectDates(list) {
+  return list.filter(function(p) {
+    return p.transaction_date && !p.date_ok && dateLooksWrong(p.transaction_date, Date.parse(p.savedAt || "") || Date.now());
+  }).map(function(p) {
+    return { id: p.id, display_id: showId(p), date: p.transaction_date, savedAt: p.savedAt || null, suggested: suggestYearFix(p.transaction_date, Date.parse(p.savedAt || "") || Date.now()) };
+  });
+}
+
 function createSlipRecord(buf, data, source, lineMsgId) {
+  if (data && dateLooksWrong(data.transaction_date, Date.now())) {
+    var fixed = suggestYearFix(data.transaction_date, Date.now());
+    if (fixed) {
+      console.log("Year auto-fixed:", data.transaction_date, "→", fixed);
+      data.date_autofixed_from = data.transaction_date;
+      data.transaction_date = fixed;
+    }
+  }
   if (data && data.category) {
     var catsV = loadCategories();
     if (catsV.indexOf(data.category) === -1) data.category = null;
@@ -329,7 +366,13 @@ function slipReply(rec) {
   ];
   if (c.kind === "internal") lines.push("🔁 โอนภายใน — ไม่นับเป็นค่าใช้จ่าย");
   if (c.kind === "petty_cash") lines.push("💵 เงินสดย่อย → " + (c.toBranch || "?"));
-  if (c.from && !c.from.branch && c.from.firstSeenSlip === rec.id) lines.push("🆕 บัญชีใหม่ " + c.from.bank + " ****" + c.from.last4 + " — ตั้งสาขาที่ /app → Report");
+  if (c.from && !c.from.branch && c.from.firstSeenSlip === rec.id) {
+    var sim = similarAccount(reg, c.from);
+    lines.push(sim
+      ? "🆕 " + c.from.bank + " ****" + c.from.last4 + " — หรืออ่านผิดจาก ****" + sim.last4 + "? ถ้าผิด แก้เลขบัญชีใน /app (Edit)"
+      : "🆕 บัญชีใหม่ " + c.from.bank + " ****" + c.from.last4 + " — ตั้งสาขาที่ /app → Report");
+  }
+  if (rec.date_autofixed_from) lines.push("📅 ปีบนสลิปอ่านได้ " + rec.date_autofixed_from + " → แก้เป็น " + rec.transaction_date + " (เช็กได้ใน /app)");
   lines.push("📎 Match bills at " + BASE_URL + "/app");
   return lines.join("\n");
 }
@@ -404,6 +447,15 @@ function registerFromAccount(reg, p) {
   if (!last4(p.account_from) || findAccount(reg, p.bank_from, p.account_from)) return false;
   reg.accounts.push({ bank: normalizeBank(p.bank_from), last4: last4(p.account_from), alt: [], branch: null, type: "company", label: "", firstSeenSlip: p.id, firstSeenAt: new Date().toISOString() });
   return true;
+}
+// Same bank, same length, exactly one digit different → probably a misread (6284 vs 8284)
+function similarAccount(reg, acct) {
+  return reg.accounts.find(function(a) {
+    if (a === acct || a.bank !== acct.bank || a.last4.length !== acct.last4.length || a.type === "external") return false;
+    var diff = 0;
+    for (var i = 0; i < a.last4.length; i++) if (a.last4[i] !== acct.last4[i]) diff++;
+    return diff === 1;
+  }) || null;
 }
 function syncAccounts() {
   var reg = loadAccounts();
@@ -576,7 +628,8 @@ function checkMonth(y, m) {
   });
   r.unassigned = Object.keys(ua);
   r.noDate = all.filter(function(p) { return !p.transaction_date; }).map(showId);
-  r.ready = !r.missingBill.length && !r.noCategory.length && !r.pendingInternal.length && !r.unassigned.length && !r.noDate.length;
+  r.suspectDate = suspectDates(all);
+  r.ready = !r.missingBill.length && !r.noCategory.length && !r.pendingInternal.length && !r.unassigned.length && !r.noDate.length && !r.suspectDate.length;
   return r;
 }
 
@@ -599,6 +652,7 @@ function readinessText(r) {
   if (r.missingBill.length) lines.push("⚠️ ขาดบิล/note: " + r.missingBill.length + " — " + idList(r.missingBill));
   if (r.noCategory.length) lines.push("🏷 ยังไม่จัดหมวด: " + r.noCategory.length + " — " + idList(r.noCategory));
   if (r.noDate.length) lines.push("📅 ไม่มีวันที่: " + r.noDate.length + " — " + idList(r.noDate));
+  if (r.suspectDate.length) lines.push("📅 ปีน่าสงสัย (ห่างจากวันอัปโหลด): " + r.suspectDate.length + " — " + idList(r.suspectDate.map(function(x) { return x.display_id; })));
   if (r.unassigned.length) lines.push("🆕 บัญชียังไม่ระบุสาขา: " + r.unassigned.slice(0, 5).join(", ") + (r.unassigned.length > 5 ? " +" + (r.unassigned.length - 5) : ""));
   if (r.pendingInternal.length) lines.push("🔁 รอยืนยันโอนภายใน: " + r.pendingInternal.length + " — " + idList(r.pendingInternal));
   if (r.inbox) lines.push("📥 Inbox ค้าง " + r.inbox + " รูป (ไม่บล็อก)");
@@ -1002,7 +1056,7 @@ async function handleEvent(event) {
     var noteIdM = txt.match(/^note\s*#?\s*(\d+)\s*:\s*([\s\S]+)/i);
     if (noteIdM) {
       var listN = loadPayments();
-      var ni = listN.findIndex(function(p) { return String(p.display_id) === noteIdM[1] || String(p.id) === noteIdM[1]; });
+      var ni = listN.findIndex(function(p) { return String(p.display_id) === noteIdM[1] || String(p.id) === noteIdM[1] || (p.old_display_ids || []).indexOf(noteIdM[1]) !== -1; });
       if (ni === -1) return client.replyMessage(event.replyToken, { type: "text", text: "⚠️ No transaction #" + noteIdM[1] + " found. Check /list or the web app." });
       listN[ni].evidence_note = noteIdM[2].trim();
       savePayments(listN);
@@ -1190,7 +1244,15 @@ app.get("/api/slips", auth, function(req, res) {
 });
 
 // ── Accounts / branches / aliases ──
-app.get("/api/accounts", auth, function(req, res) { res.json(syncAccounts()); });
+app.get("/api/accounts", auth, function(req, res) {
+  var reg = syncAccounts();
+  var counts = {};
+  loadPayments().forEach(function(p) { var a = findAccount(reg, p.bank_from, p.account_from); if (a) counts[a.bank + "_" + a.last4] = (counts[a.bank + "_" + a.last4] || 0) + 1; });
+  res.json(Object.assign({}, reg, { accounts: reg.accounts.map(function(a) {
+    var sim = similarAccount(reg, a);
+    return Object.assign({}, a, { _slips: counts[a.bank + "_" + a.last4] || 0, _similar: sim ? sim.last4 : null });
+  }) }));
+});
 app.post("/api/accounts", auth, function(req, res) {
   var b = req.body || {};
   var clean = function(arr) {
@@ -1604,7 +1666,7 @@ app.patch("/api/slips/:id", auth, function(req, res) {
   var list = loadPayments();
   var idx = list.findIndex(function(p) { return String(p.id) === String(req.params.id); });
   if (idx === -1) return res.status(404).json({ error: "not found" });
-  var allowed = ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number","category","evidence_note"];
+  var allowed = ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number","category","evidence_note","date_ok"];
   allowed.forEach(function(f) {
     if (req.body[f] !== undefined) list[idx][f] = req.body[f];
   });
@@ -1612,8 +1674,12 @@ app.patch("/api/slips/:id", auth, function(req, res) {
     var catsP = loadCategories();
     if (catsP.indexOf(list[idx].category) === -1) list[idx].category = null;
   }
-  if (!list[idx].display_id && list[idx].transaction_date) {
-    list[idx].display_id = nextDisplayId(list[idx].transaction_date);
+  // display id = yymmNN of the transaction month — re-number when the date moves to another month
+  var td = list[idx].transaction_date;
+  var wantPrefix = td && /^\d{4}-\d{2}/.test(td) ? td.slice(2, 4) + td.slice(5, 7) : null;
+  if (wantPrefix && (!list[idx].display_id || String(list[idx].display_id).indexOf(wantPrefix) !== 0)) {
+    if (list[idx].display_id) list[idx].old_display_ids = (list[idx].old_display_ids || []).concat([String(list[idx].display_id)]);
+    list[idx].display_id = nextDisplayId(td);
   }
   savePayments(list);
   res.json(list[idx]);
@@ -1668,4 +1734,4 @@ if (require.main === module) {
   });
 }
 // exported for offline test scripts only
-module.exports = { app: app, client: client, classify: classify, loadAccounts: loadAccounts, checkMonth: checkMonth, monthTotals: monthTotals, makeReport: makeReport, scheduleTick: scheduleTick, linkSuggestions: linkSuggestions, nameMatchesAlias: nameMatchesAlias, readinessText: readinessText, reportReadyText: reportReadyText };
+module.exports = { app: app, client: client, classify: classify, loadAccounts: loadAccounts, checkMonth: checkMonth, monthTotals: monthTotals, makeReport: makeReport, scheduleTick: scheduleTick, linkSuggestions: linkSuggestions, nameMatchesAlias: nameMatchesAlias, readinessText: readinessText, reportReadyText: reportReadyText, suggestYearFix: suggestYearFix, suspectDates: suspectDates };
