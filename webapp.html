@@ -1121,7 +1121,8 @@ function renderAccounts() {
     var i = ACCTS.accounts.indexOf(a);
     var needs = !a.branch && a.type !== "external";
     return '<div class="card"'+(needs?' style="border-color:#EF9A9A"':'')+'>'+
-      '<div class="slip-head"><b>'+esc(a.bank)+' ****'+esc(a.last4)+'</b>'+(needs?'<span class="tag tag-new">🆕 set branch</span>':'')+'</div>'+
+      '<div class="slip-head"><b>'+esc(a.bank)+' ****'+esc(a.last4)+' <span class="small">· '+(a._slips||0)+' slip(s)</span></b>'+(needs?'<span class="tag tag-new">🆕 set branch</span>':'')+'</div>'+
+      (a._similar?'<div class="suggest">⚠️ Looks like ****'+esc(a._similar)+' (one digit different) — maybe a misread. Check the slip and fix the account number with ✏️ Edit, or Remove this account if it is not real.</div>':'')+
       '<div class="acct-row">'+
         '<select onchange="acctSet('+i+',\'branch\',this.value)">'+brOpts(a.branch)+'</select>'+
         '<select onchange="acctSet('+i+',\'type\',this.value)">'+tyOpts(a.type)+'</select>'+
@@ -1194,6 +1195,11 @@ function loadReadiness() {
     if (r.missingBill.length) lines.push("⚠️ Missing bill / note: <b>"+r.missingBill.length+"</b> — "+ids(r.missingBill));
     if (r.noCategory.length) lines.push("🏷 No category: <b>"+r.noCategory.length+"</b> — "+ids(r.noCategory));
     if (r.noDate.length) lines.push("📅 No date: <b>"+r.noDate.length+"</b> — "+ids(r.noDate));
+    (r.suspectDate||[]).forEach(function(x) {
+      lines.push("📅 #"+esc(x.display_id)+" dated <b>"+esc(x.date)+"</b> but uploaded "+(x.savedAt?esc(x.savedAt.slice(0,10)):"?")+" — year misread?"+
+        '<div class="row mt">'+(x.suggested?'<button class="btn btn-green btn-sm" onclick="fixDate('+x.id+',\''+esc(x.suggested)+'\')">✅ Change to '+esc(x.suggested)+'</button>':'')+
+        '<button class="btn btn-gray btn-sm" onclick="dateOk('+x.id+')">Date is correct</button></div>');
+    });
     if (r.unassigned.length) lines.push("🆕 Account branch not set: "+r.unassigned.map(esc).join(", "));
     if (r.pendingInternal.length) lines.push("🔁 Internal transfer to confirm: <b>"+r.pendingInternal.length+"</b> — "+ids(r.pendingInternal));
     var head = r.ready ? '<div class="ready-ok">✅ Ready — '+r.count+' transactions</div>' : '<div style="font-weight:700;color:var(--orange)">⏳ Not ready yet</div>';
@@ -1202,6 +1208,16 @@ function loadReadiness() {
     foot.push(r.sentAt ? "📨 Auto report sent "+new Date(r.sentAt).toLocaleString("th-TH") : (r.recipientSet ? "🔔 Auto report goes to LINE when ready" : "🔕 No LINE recipient — type /notify here in your private chat with the bot"));
     box.innerHTML = head + lines.map(function(l){ return '<div class="ready-line">'+l+'</div>'; }).join("") + '<div class="small mt">'+foot.join("<br>")+'</div>';
   });
+}
+
+function fixDate(id, d) {
+  api("PATCH","/api/slips/"+id,{transaction_date:d}).then(function(p){
+    if (p.error) { toast("❌ "+p.error); return; }
+    toast("📅 Fixed → #"+(p.display_id||p.id)); loadReadiness(); loadSlips(); loadMatch();
+  });
+}
+function dateOk(id) {
+  api("PATCH","/api/slips/"+id,{date_ok:true}).then(function(){ toast("✅ Kept"); loadReadiness(); });
 }
 
 // ── Report ──
