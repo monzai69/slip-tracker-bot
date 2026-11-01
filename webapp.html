@@ -276,6 +276,8 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
       <button class="btn btn-blue btn-full" onclick="saveAlloc()">💾 Save sharing for this month</button>
       <div class="small mt">Saved per month — changing a later month never changes this one.</div>
     </div>
+    <div class="section-title">👥 Payroll split by branch</div>
+    <div class="card" id="payrollBox"><div class="small">Loading…</div></div>
     <div class="section-title">🏷 Fixed / variable by category</div>
     <div class="card"><div id="costTypeRows"></div><div class="small mt">"Not classified" counts as fixed until you choose. A single slip can be changed in ✏️ Edit.</div></div>
   </div>
@@ -291,6 +293,20 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
       <button class="btn btn-blue btn-full" onclick="downloadReport()">⬇️ Download Excel</button>
       <button class="btn btn-gray btn-full" style="margin-top:8px" onclick="loadReadiness()">🔍 Check readiness of this month</button>
       <div id="readyBox" class="mt"></div>
+    </div>
+
+    <div class="section-title">🏦 Bank statements</div>
+    <div class="card">
+      <div id="driveBox" class="small">Loading…</div>
+      <div class="row mt">
+        <input id="driveLink" placeholder="Paste the Google Drive folder link" style="flex:1">
+        <button class="btn btn-gray btn-sm" onclick="saveDriveFolder()">Save</button>
+      </div>
+      <button class="btn btn-blue btn-full" id="driveSyncBtn" onclick="driveSyncNow()">🔄 Get new files from Drive</button>
+      <button class="btn btn-gray btn-full" style="margin-top:8px" onclick="document.getElementById('stmtFile').click()">📤 Upload statement / payroll CSV</button>
+      <input type="file" id="stmtFile" accept=".csv,text/csv" multiple onchange="uploadStatements(this.files)">
+      <div id="stmtResults" class="small mt"></div>
+      <div id="stmtSummary" class="mt"></div>
     </div>
 
     <div class="section-title">🏢 Branches</div>
@@ -486,7 +502,7 @@ function switchTab(v) {
   if (v==="slips") loadSlips();
   if (v==="match") loadMatch();
   if (v==="stats") loadCats(function(){ loadAccounts(function(){ fillBranchSelect(); loadStats(); }); });
-  if (v==="report") loadAccounts(function(){ renderAccounts(); loadReadiness(); });
+  if (v==="report") loadAccounts(function(){ renderAccounts(); loadReadiness(); loadStatementsBox(); });
   if (v==="dash") loadCats(loadDash);
 }
 
@@ -1238,6 +1254,7 @@ function renderAccounts() {
         '<select onchange="acctSet('+i+',\'type\',this.value)">'+tyOpts(a.type)+'</select>'+
         '<input placeholder="Nickname e.g. Samui main" value="'+esc(a.label||"")+'" onchange="acctSet('+i+',\'label\',this.value)">'+
         '<input placeholder="Other last-4 seen on slips" value="'+esc((a.alt||[]).join(", "))+'" onchange="acctSet('+i+',\'alt\',this.value)">'+
+        '<input style="grid-column:1/-1" inputmode="numeric" placeholder="Full account number e.g. 168-3-58464-5 (filled by statements)" value="'+esc(a.full||"")+'" onchange="acctSet('+i+',\'full\',this.value)">'+
       '</div>'+
       '<div class="row mt" style="justify-content:flex-end"><button class="btn btn-red btn-sm" onclick="delAccount('+i+')">🗑 Remove</button></div>'+
     '</div>';
@@ -1380,6 +1397,14 @@ function loadReadiness() {
         '<span class="small">uploaded '+esc((x.savedAt||"").slice(0,10))+'</span>'+
         (x.suggested?'<button class="btn btn-green btn-sm" onclick="fixDate('+p.id+',\''+esc(x.suggested)+'\')">✅ Change to '+esc(x.suggested)+'</button>':'')+
         '<button class="btn btn-gray btn-sm" onclick="dateOk('+p.id+')">Date is correct</button>'); })));
+    secs.push(rdySection("🏦 In the bank statement, but no slip", "Money left the account but nothing is recorded. Match it to a slip, record it, or say why it's not an expense.",
+      (r.stmtNoSlip||[]).map(function(l){ return stmtRow(l); })));
+    secs.push(rdySection("🔍 Slip not found in the bank statement", "The statement covers this day but has no such payment — check account, date and amount (or a duplicate).",
+      (it.notInStatement||[]).map(S).filter(Boolean).map(function(p){ return slipRow(p,
+        '<button class="btn btn-blue btn-sm" onclick="rdyEdit('+p.id+')">✏️ Fix</button>'+
+        '<button class="btn btn-gray btn-sm" onclick="markSlip('+p.id+',{stmt_ok:true})">It is correct</button>'+
+        '<button class="btn btn-red btn-sm" onclick="delDup('+p.id+',\''+esc(slipLabel(p))+'\')">🗑 Delete</button>'); })));
+    if ((r.missingStatements||[]).length) secs.push('<div class="rdy-sec"><div class="rdy-title">📄 Statement missing <span class="badge">'+r.missingStatements.length+'</span></div><div class="small">'+r.missingStatements.map(esc).join("<br>")+'<br>→ put this month\'s statement in the Drive folder (or upload it below)</div></div>');
     secs.push(rdySection("📅 No date", "", (it.noDate||[]).map(S).filter(Boolean).map(function(p){ return slipRow(p,
         '<button class="btn btn-blue btn-sm" onclick="rdyEdit('+p.id+')">✏️ Add date</button>'); })));
     if (r.unassigned.length) secs.push('<div class="rdy-sec"><div class="rdy-title">🆕 Account branch not set <span class="badge">'+r.unassigned.length+'</span></div><div class="small">'+r.unassigned.map(esc).join("<br>")+'<br>→ set the branch in 🏦 Accounts below (or fix "From Acct" with ✏️ Edit if it was misread)</div></div>');
@@ -1390,6 +1415,105 @@ function loadReadiness() {
     box.innerHTML = head + secs.join("") + '<div class="small mt">'+foot.join("<br>")+'</div>';
   });
 }
+function stmtRow(l) {
+  var cp = l.counterparty || {};
+  var cands = (l.candidates||[]).map(function(c){
+    return '<button class="btn btn-gray btn-sm" onclick="stmtAct(\''+l.id+'\',{action:\'match\',slipId:'+c.id+'})">🔗 It\'s #'+esc(c.display_id)+' ('+esc(c.date)+' · '+esc(c.recipient||c.from)+')</button>';
+  }).join("");
+  return '<div class="rdy-row"><div class="rdy-thumb rdy-noimg">🏦<br>bank</div><div class="rdy-info">'+
+    '<div><b>'+esc(l.date)+' '+esc(l.time||"")+'</b> <span class="amt">'+fmtB(l.amount)+'</span></div>'+
+    '<div class="small">'+esc(l.account)+'</div>'+
+    '<div class="small">→ <b>'+esc(cp.name||l.desc)+'</b>'+(cp.digits?' · '+esc(cp.bank||"")+' x'+esc(cp.digits):'')+'</div>'+
+    '<div class="row" style="margin-top:6px">'+cands+
+      '<button class="btn btn-orange btn-sm" onclick="stmtAct(\''+l.id+'\',{action:\'record\'})">➕ Record (no slip)</button>'+
+      '<button class="btn btn-gray btn-sm" onclick="stmtIgnore(\''+l.id+'\')">Not an expense…</button></div>'+
+  '</div></div>';
+}
+function stmtAct(id, body) {
+  api("POST","/api/statements/line/"+id, body).then(function(d){
+    if (!d.ok) { toast("❌ "+(d.error||"error")); return; }
+    toast(body.action==="record" ? "➕ Recorded "+(d.record.display_id?"#"+d.record.display_id:"")+" — add purpose, category and bill" : "✅ Done");
+    loadReadiness(); loadSlips();
+  });
+}
+function stmtIgnore(id) {
+  var note = prompt("Why is this not an expense? (e.g. refund, moved between our own accounts, credit card — itemised later)");
+  if (note && note.trim()) stmtAct(id, {action:"ignore", note: note.trim()});
+}
+function loadStatementsBox() {
+  api("GET","/api/drive").then(function(d){
+    var h;
+    if (!d.configured) h = '⚙️ Drive is not connected yet — set GOOGLE_SERVICE_ACCOUNT_JSON on Railway (see the setup guide). You can still upload files below.';
+    else h = 'Share your statements folder (Viewer) with:<br><b style="user-select:all">'+esc(d.email)+'</b>'+
+      (d.folderId ? '<br>📁 Folder set · last check: '+(d.lastSync?new Date(d.lastSync).toLocaleString("th-TH"):"never")+' · checks again by itself every 6 hours' : '<br>📁 No folder set yet — paste its link below');
+    document.getElementById("driveBox").innerHTML = h;
+    document.getElementById("driveSyncBtn").disabled = !(d.configured && d.folderId);
+  });
+  var y = document.getElementById("repYear").value, m = document.getElementById("repMonth").value;
+  api("GET","/api/statements?year="+y+"&month="+m).then(function(d){
+    var A = d.recon.accounts;
+    document.getElementById("stmtSummary").innerHTML = A.length ? '<table class="stats-table"><tr><th>Account ('+esc(d.recon.ym)+')</th><th>Statement</th><th>Out</th><th>✅</th><th>⚠️</th><th>Sales in</th></tr>'+
+      A.map(function(a){ return '<tr><td>'+esc(a.label)+'</td><td>'+(a.coverage==="full"?"✅ full":a.coverage==="partial"?"◐ part":"❌ none")+'</td><td class="num">'+fmtB(a.moneyOut)+'</td><td class="num">'+(a.matched+a.internal)+'</td><td class="num">'+a.noSlip+'</td><td class="num">'+fmtB(a.sales)+'</td></tr>'; }).join("")+'</table>'
+      : '<div class="small">No statements imported yet.</div>';
+  });
+}
+function saveDriveFolder() {
+  api("POST","/api/drive/folder",{link:document.getElementById("driveLink").value}).then(function(d){ if (d.ok) { toast("📁 Folder saved"); document.getElementById("driveLink").value=""; loadStatementsBox(); } else toast("❌ "+(d.error||"error")); });
+}
+function showImportResults(list) {
+  document.getElementById("stmtResults").innerHTML = list.map(function(r){
+    var name = esc(r.file || r.name || "");
+    if (r.ok && r.kind==="payroll_csv") return "👥 "+name+" — payroll "+esc(r.month)+": "+r.people+" people, "+fmtB(r.total)+" (split it in the 💹 P&L tab)";
+    if (r.ok) return "✅ "+name+" — "+esc(r.account)+" "+esc(r.period.from)+" → "+esc(r.period.to)+", "+r.lines+" lines (balance checked)";
+    return (r.skipped?"⏭ ":"❌ ")+name+" — "+esc(r.error||"");
+  }).join("<br>") || "No new or changed files.";
+}
+function driveSyncNow() {
+  var b = document.getElementById("driveSyncBtn"); b.disabled = true; b.textContent = "🔄 Checking Drive…";
+  api("POST","/api/drive/sync").then(function(d){
+    b.disabled = false; b.textContent = "🔄 Get new files from Drive";
+    if (!d.ok) { toast("❌ "+(d.error||"error")); return; }
+    showImportResults(d.results); loadStatementsBox(); loadReadiness();
+  });
+}
+function uploadStatements(files) {
+  var arr = Array.from(files||[]), out = [], i = 0;
+  var y = document.getElementById("repYear").value, m = document.getElementById("repMonth").value;
+  function next() {
+    if (i >= arr.length) { showImportResults(out); loadStatementsBox(); loadReadiness(); document.getElementById("stmtFile").value=""; return; }
+    var f = arr[i++], rd = new FileReader();
+    rd.onload = function(){ api("POST","/api/statements/upload",{name:f.name,data:rd.result,month:y+"-"+String(m).padStart(2,"0")}).then(function(r){ out.push(Object.assign({file:f.name},r)); next(); }).catch(function(){ out.push({file:f.name,error:"upload failed"}); next(); }); };
+    rd.readAsDataURL(f);
+  }
+  next();
+}
+
+// ── Payroll split (P&L tab) ──
+function loadPayrollBox() {
+  var ym = dashYM();
+  api("GET","/api/payroll?year="+ym.y+"&month="+ym.m).then(function(P){
+    var el = document.getElementById("payrollBox");
+    if (!P.imported) { el.innerHTML = '<div class="small">No payroll file for this month yet. Put <b>RCG_Payroll_&lt;Month&gt;_&lt;Year&gt;.csv</b> in the Drive folder or upload it in the Report tab.</div>'; return; }
+    var h = '<div class="small">'+esc(P.file)+' · '+P.people+' people · net '+fmtB(P.total)+(P.applied?' · ✅ applied':'')+'</div>';
+    h += '<table class="stats-table mt"><tr><th>Branch</th><th>Net pay</th></tr>'+Object.keys(P.byBranch).map(function(b){ return '<tr><td>'+esc(b)+'</td><td class="num">'+fmtB(P.byBranch[b])+'</td></tr>'; }).join("")+'</table>';
+    if (P.unmapped.length) h += P.unmapped.map(function(u){
+      return '<div class="warn">Which branch is "'+esc(u)+'"? <select onchange="mapPayroll(\''+esc(u).replace(/'/g,"\\'")+'\',this.value)" style="width:auto"><option value="">choose…</option>'+P.branches.map(function(b){ return '<option>'+esc(b)+'</option>'; }).join("")+'</select></div>';
+    }).join("");
+    h += (P.individual||[]).map(function(i){ return '<div class="small mt">👤 #'+esc(i.display_id)+' '+fmtB(i.amount)+' = '+esc(i.person)+' → '+esc(i.branch||"?")+'</div>'; }).join("");
+    if (P.batch) h += '<div class="small mt">📦 Batch #'+esc(P.batch.display_id)+' '+fmtB(P.batch.amount)+' → '+P.batch.alloc.map(function(a){ return esc(a.branch)+' '+fmtB(a.amount); }).join(" · ")+
+      (Math.abs(P.batch.diff)>1?' <span class="neg">(batch differs from payroll by '+fmtB(P.batch.diff)+' — split by share)</span>':'')+'</div>';
+    else h += '<div class="warn">No salary payment found for this month yet (category "เงินเดือน/Salary").</div>';
+    if (P.batch || (P.individual||[]).length) h += '<button class="btn btn-green btn-full" onclick="applyPayroll()">✅ Apply split to these payments</button>';
+    el.innerHTML = h;
+  });
+}
+function mapPayroll(raw, branch) { api("POST","/api/payroll/branch-map",{raw:raw,branch:branch}).then(loadPayrollBox); }
+function applyPayroll() {
+  var ym = dashYM();
+  if (!confirm("Split the salary payments of this month by branch using the payroll file?\n(This replaces any manual split on them.)")) return;
+  api("POST","/api/payroll/apply",{year:ym.y,month:ym.m}).then(function(d){ if (d.ok) { toast("👥 Payroll split applied"); loadDash(); } else toast("❌ "+(d.error||"error")); });
+}
+
 function rdyNoBill(id) {
   api("POST","/api/slips/"+id+"/no-bill",{expected:true}).then(function(){ toast("🚫 Marked: no bill expected"); loadReadiness(); loadMatch(); });
 }
@@ -1487,7 +1611,7 @@ function loadDash() {
           return '<td class="num">'+(c? (c.pctOfRevenue!==null? pct(c.pctOfRevenue) : '') + '<div class="small">'+fmtB(c.amount)+'</div>' : '–')+'</td>';
         }).join("")+'</tr>';
       }).join("")+'</table>' : '<div class="empty small">No costs this month</div>';
-    renderRevenueInputs(); renderHq(); renderCostTypes();
+    renderRevenueInputs(); renderHq(); renderCostTypes(); loadPayrollBox();
     loadChartJs(drawDashCharts);
   });
 }

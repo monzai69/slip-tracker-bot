@@ -463,13 +463,13 @@ function styleHdr(row, color) {
 function normalizeBank(b) {
   var s = (b || "Unknown").trim();
   var l = s.toLowerCase();
-  if (/kasikorn|kbank|kbiz/.test(l)) return "KBank";
+  if (/kasikorn|kbank|kbiz|กสิกร/.test(l)) return "KBank";
   if (/government\s*savings|gsb|ออมสิน/.test(l)) return "GSB";
-  if (/ayudhya|krungsri|(^|[^a-z])bay([^a-z]|$)/.test(l)) return "Krungsri";
-  if (/krung\s*thai|ktb/.test(l)) return "Krungthai";
-  if (/bangkok\s*bank|bbl/.test(l)) return "Bangkok Bank";
-  if (/siam\s*commercial|scb/.test(l)) return "SCB";
-  if (/tmb|ttb|thanachart/.test(l)) return "TTB";
+  if (/ayudhya|krungsri|(^|[^a-z])bay([^a-z]|$)|กรุงศรี/.test(l)) return "Krungsri";
+  if (/krung\s*thai|ktb|กรุงไทย/.test(l)) return "Krungthai";
+  if (/bangkok\s*bank|bbl|กรุงเทพ/.test(l)) return "Bangkok Bank";
+  if (/siam\s*commercial|scb|ไทยพาณิชย์/.test(l)) return "SCB";
+  if (/tmb|ttb|thanachart|ทหารไทย|ธนชาต/.test(l)) return "TTB";
   if (/baac|เพื่อการเกษตร/.test(l)) return "BAAC";
   if (/prompt\s*pay|พร้อมเพย์/.test(l)) return "PromptPay";
   if (/uob/.test(l)) return "UOB";
@@ -510,11 +510,15 @@ function last4(acct) {
   var d = String(acct || "").replace(/\D/g, "");
   return d.length >= 3 ? d.slice(-4) : null;
 }
+// Banks show different slices of one number (168-3-58464-5 → "8464" on slips, "X4645" / "X584645" on statements);
+// with the full number saved, any 4+ digit slice of it matches
 function findAccount(reg, bank, acct) {
   var l = last4(acct);
   if (!l) return null;
   var nb = normalizeBank(bank);
-  return reg.accounts.find(function(a) { return a.bank === nb && (a.last4 === l || (a.alt || []).indexOf(l) !== -1); }) || null;
+  var digits = String(acct || "").replace(/\D/g, "");
+  return reg.accounts.find(function(a) { return a.bank === nb && (a.last4 === l || (a.alt || []).indexOf(l) !== -1); }) ||
+    (digits.length >= 4 ? reg.accounts.find(function(a) { return a.bank === nb && a.full && a.full.indexOf(digits) !== -1; }) : null) || null;
 }
 // Paying (from) accounts are discovered automatically from slips
 function registerFromAccount(reg, p) {
@@ -674,6 +678,436 @@ async function flagInternalCandidates(ids, force) {
   return { checked: targets.length, flagged: flagged };
 }
 
+// ── Bank statements: import, balance check, match with slips ──────────────
+// The statement is the bank's own record; slips and bills are the evidence attached to it.
+// statements.json = { files: {key: info}, lines: [line], drive: {fileId: modifiedTime} }
+const STMT_FILE = path.join(DATA_DIR, "statements.json");
+const STMT_DIR = path.join(DATA_DIR, "statements"); // original files, kept for audit
+const PAYROLL_DIR = path.join(DATA_DIR, "payroll");
+function loadStatements() {
+  var d = loadJsonFile(STMT_FILE, null) || {};
+  if (!d.files) d.files = {};
+  if (!Array.isArray(d.lines)) d.lines = [];
+  if (!d.drive) d.drive = {};
+  return d;
+}
+function saveStatements(d) { fs.writeFileSync(STMT_FILE, JSON.stringify(d)); }
+function round2(n) { return Math.round(n * 100) / 100; }
+function sha(s) { return crypto.createHash("sha1").update(s).digest("hex"); }
+
+// RFC-4180 CSV (quoted fields may contain commas and new lines)
+function parseCsv(text) {
+  var rows = [], row = [], cell = "", q = false;
+  for (var i = 0; i < text.length; i++) {
+    var ch = text[i];
+    if (q) {
+      if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+      else cell += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === ",") { row.push(cell); cell = ""; }
+    else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && text[i + 1] === "\n") i++;
+      row.push(cell); rows.push(row); row = []; cell = "";
+    } else cell += ch;
+  }
+  if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+// UTF-8, or Thai Windows-874 when the bytes are not valid UTF-8
+function decodeText(buf) {
+  var t = buf.toString("utf8");
+  if (t.indexOf("�") !== -1) { try { t = new TextDecoder("windows-874").decode(buf); } catch (e) {} }
+  return t.replace(/^﻿/, "");
+}
+function toNum(v) {
+  var s = String(v == null ? "" : v).replace(/[,\s"]/g, "");
+  if (!s) return null;
+  var neg = /^\(.*\)$/.test(s);
+  var n = Number(s.replace(/[()]/g, ""));
+  return isNaN(n) ? null : (neg ? -n : n);
+}
+function dmyToIso(d) { var m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(d || "").trim()); return m ? m[3] + "-" + m[2] + "-" + m[1] : null; }
+
+function detectFileKind(text) {
+  var first = text.split(/\r?\n/)[0] || "";
+  if (/K-DEPOSIT STATEMENT/i.test(text.slice(0, 600))) return "kbank_csv";
+  if (/^Account Number,Account Name,Account Type/i.test(first)) return "scb_csv";
+  if (/(^|,)Branch(,|$)/i.test(first) && /NET PAY/i.test(first)) return "payroll_csv";
+  return null;
+}
+
+// "โอนไป SCB X6710 บริษัท …", "รับโอนจาก KBANK x4645 …", "PromptPay to x2484 MR …", "เพื่อชำระ Ref X5042 บจก. บัตรกรุงศรีอยุธยา"
+function parseCounterparty(desc, ownBank) {
+  var d = String(desc || "").replace(/\+\+\s*$/, "").trim();
+  var bill = /เพื่อชำระ\s+(?:([A-Z]{2,6})\s+)?Ref\s+\S+\s+(.*)$/i.exec(d);
+  if (bill) return { bank: null, digits: null, name: bill[2].trim(), bill: true };
+  var m = /(?:^|\s)(?:([A-Z]{2,6})\s+)?[xX](\d{3,})\s*(.*)$/.exec(d);
+  if (!m) return { bank: null, digits: null, name: d };
+  var bank = m[1] && !/^(TO|REF)$/i.test(m[1]) ? normalizeBank(m[1]) : null;
+  if (/พร้อมเพย์|promptpay/i.test(d)) bank = "PromptPay";
+  return { bank: bank || ownBank, digits: m[2], name: (m[3] || "").replace(/\+\+$/, "").trim() };
+}
+
+function parseKBankCsv(text) {
+  var rows = parseCsv(text), acct = null, period = null, opening = null, lines = [];
+  rows.forEach(function(r) {
+    var c = r.map(function(x) { return String(x || "").trim(); });
+    var i = c.indexOf("เลขที่บัญชีเงินฝาก");
+    if (i !== -1) acct = c.slice(i + 1).find(function(x) { return /\d{3}-\d/.test(x); }) || acct;
+    i = c.indexOf("รอบระหว่างวันที่");
+    if (i !== -1) period = c.slice(i + 1).find(function(x) { return /\d{2}\/\d{2}\/\d{4}/.test(x); }) || period;
+    var dm = /^(\d{2})-(\d{2})-(\d{2})$/.exec(c[1] || "");
+    if (!dm) return;
+    if (c[3] === "ยอดยกมา") { opening = toNum(c[8]); return; }
+    lines.push({ date: "20" + dm[3] + "-" + dm[2] + "-" + dm[1], time: c[2] || "", type: c[3], out: toNum(c[4]), in: toNum(c[6]), balance: toNum(c[8]), channel: c[10] || "", desc: c[12] || "" });
+  });
+  var pm = /(\d{2}\/\d{2}\/\d{4})\s*-\s*(\d{2}\/\d{2}\/\d{4})/.exec(period || "");
+  return { bank: "KBank", full: String(acct || "").replace(/\D/g, ""), period: pm ? { from: dmyToIso(pm[1]), to: dmyToIso(pm[2]) } : null, opening: opening, lines: lines };
+}
+
+function parseScbCsv(text) {
+  var rows = parseCsv(text), lines = [], full = null;
+  rows.slice(1).forEach(function(r) {
+    if (r.length < 14 || !dmyToIso(r[5])) return;
+    full = full || String(r[0]).replace(/\D/g, "");
+    lines.push({ date: dmyToIso(r[5]), time: String(r[6] || "").trim(), type: String(r[8] || "").trim(), out: toNum(r[11]), in: toNum(r[12]), balance: toNum(r[13]), channel: String(r[9] || "").trim(), desc: String(r[14] || "").trim() });
+  });
+  if (!lines.length) return { bank: "SCB", full: full, period: null, opening: null, lines: [] };
+  var f = lines[0];
+  var opening = round2(f.balance + (f.out || 0) - (f.in || 0)); // export has no opening row
+  return { bank: "SCB", full: full, period: { from: lines[0].date, to: lines[lines.length - 1].date }, opening: opening, lines: lines };
+}
+
+// every running balance must follow from the previous one — catches a bad file before it is trusted
+function checkBalances(opening, lines) {
+  if (opening === null || opening === undefined) return { ok: false, error: "no opening balance found" };
+  var bal = opening;
+  for (var i = 0; i < lines.length; i++) {
+    bal = round2(bal - (lines[i].out || 0) + (lines[i].in || 0));
+    if (lines[i].balance !== null && Math.abs(bal - lines[i].balance) > 0.005) {
+      return { ok: false, error: "balance does not add up at line " + (i + 1) + " (" + lines[i].date + " " + lines[i].time + "): expected " + bal.toFixed(2) + ", file says " + lines[i].balance.toFixed(2) };
+    }
+  }
+  return { ok: true, closing: bal };
+}
+
+// find (or add) the registry entry for a statement's account; remembers the full number
+function accountForStatement(reg, bank, full) {
+  var a = reg.accounts.find(function(x) { return x.bank === bank && x.full === full; }) ||
+    reg.accounts.find(function(x) { return x.bank === bank && !x.full && [x.last4].concat(x.alt || []).some(function(l) { return l && full.indexOf(l) !== -1; }); });
+  if (a) { a.full = full; return a; }
+  a = { bank: bank, last4: full.slice(-4), alt: [], full: full, branch: null, type: "company", label: "", firstSeenSlip: null, firstSeenAt: new Date().toISOString() };
+  reg.accounts.push(a);
+  return a;
+}
+function acctLabelOf(a) { return a ? a.bank + " ****" + a.last4 + (a.label ? " " + a.label : "") + (a.branch ? " · " + a.branch : "") : "?"; }
+
+function importStatement(text, info) {
+  var kind = detectFileKind(text);
+  if (kind === "payroll_csv") return importPayroll(text, info);
+  if (!kind) return { ok: false, skipped: true, error: "not a bank statement this app can read (KBank CSV, SCB CSV, payroll CSV)" };
+  var P = kind === "kbank_csv" ? parseKBankCsv(text) : parseScbCsv(text);
+  if (!P.full || P.full.length < 8) return { ok: false, error: "account number not found in file" };
+  if (!P.lines.length) return { ok: false, error: "no transactions in file" };
+  var bc = checkBalances(P.opening, P.lines);
+  if (!bc.ok) return { ok: false, error: bc.error };
+  var reg = loadAccounts();
+  var acct = accountForStatement(reg, P.bank, P.full);
+  saveAccounts(reg);
+  var st = loadStatements();
+  var key = sha(P.bank + P.full + P.period.from + P.period.to).slice(0, 16);
+  // keep your earlier decisions on lines that come back in a re-import
+  var old = {};
+  st.lines.forEach(function(l) { old[l.id] = l; });
+  st.lines = st.lines.filter(function(l) { return l.file !== key; });
+  var have = {};
+  st.lines.forEach(function(l) { have[l.id] = true; });
+  var added = 0;
+  P.lines.forEach(function(l) {
+    var id = sha([P.full, l.date, l.time, l.out, l.in, l.balance].join("|")).slice(0, 12);
+    if (have[id]) return; // same line already imported from an overlapping export
+    var cp = parseCounterparty(l.desc, P.bank);
+    var rec = Object.assign({ id: id, file: key, bank: P.bank, account: P.full, counterparty: cp }, l);
+    if (old[id]) ["slipId", "resolved"].forEach(function(f) { if (old[id][f] !== undefined) rec[f] = old[id][f]; });
+    st.lines.push(rec);
+    have[id] = true;
+    added++;
+  });
+  st.lines.sort(function(a, b) { return (a.date + a.time).localeCompare(b.date + b.time); });
+  st.files[key] = { key: key, name: info.name || "", source: info.source || "upload", driveId: info.driveId || null, bank: P.bank, account: P.full,
+    period: P.period, opening: P.opening, closing: bc.closing, count: P.lines.length, importedAt: new Date().toISOString() };
+  saveStatements(st);
+  try {
+    if (!fs.existsSync(STMT_DIR)) fs.mkdirSync(STMT_DIR, { recursive: true });
+    fs.writeFileSync(path.join(STMT_DIR, key + ".csv"), text);
+  } catch (e) { console.error("statement copy:", e.message); }
+  return { ok: true, kind: kind, account: acctLabelOf(acct), period: P.period, lines: P.lines.length, added: added, closing: bc.closing };
+}
+
+// ── Matching statement lines ↔ slips ──
+function lineAccount(reg, l) { return reg.accounts.find(function(a) { return a.bank === l.bank && a.full === l.account; }) || null; }
+function counterpartyAccount(reg, l) {
+  var cp = l.counterparty || {};
+  if (!cp.digits) return null;
+  var a = findAccount(reg, cp.bank || l.bank, cp.digits);
+  return a && a.type !== "external" && a.type !== "personal" ? a : null;
+}
+function daysApart(a, b) { return Math.abs(Date.parse(a) - Date.parse(b)) / 86400000; }
+function minutesOf(t) { var m = /^(\d{1,2}):(\d{2})/.exec(t || ""); return m ? +m[1] * 60 + +m[2] : null; }
+
+// one-to-one: each money-out line gets at most one slip of the same account, amount and ±2 days
+function matchLines(lines, slips, reg) {
+  var used = {}, byLine = {};
+  lines.forEach(function(l) {
+    var sid = l.slipId || (l.resolved && l.resolved.slipId);
+    if (sid) { byLine[l.id] = sid; used[sid] = true; }
+  });
+  var pairs = [];
+  lines.forEach(function(l) {
+    if (byLine[l.id] || l.resolved || !(l.out > 0)) return;
+    var la = lineAccount(reg, l);
+    slips.forEach(function(p) {
+      if (used[p.id] || !p.transaction_date) return;
+      if (Math.abs((Number(p.amount) || 0) - l.out) >= 0.01) return;
+      if (findAccount(reg, p.bank_from, p.account_from) !== la) return;
+      var dd = daysApart(p.transaction_date, l.date);
+      if (dd > 2) return;
+      var tm = minutesOf(p.transaction_time), lm = minutesOf(l.time);
+      pairs.push({ line: l.id, slip: p.id, score: dd * 1440 + (tm !== null && lm !== null ? Math.abs(tm - lm) : 720) });
+    });
+  });
+  pairs.sort(function(a, b) { return a.score - b.score; });
+  pairs.forEach(function(x) { if (!byLine[x.line] && !used[x.slip]) { byLine[x.line] = x.slip; used[x.slip] = true; } });
+  return { byLine: byLine, used: used };
+}
+
+function statementCoverage(st, full, ym) {
+  var first = ym + "-01", last = ym + "-" + String(new Date(+ym.slice(0, 4), +ym.slice(5), 0).getDate()).padStart(2, "0");
+  var files = Object.values(st.files).filter(function(f) { return f.account === full && f.period && f.period.from <= last && f.period.to >= first; });
+  if (!files.length) return "none";
+  var from = files.map(function(f) { return f.period.from; }).sort()[0], to = files.map(function(f) { return f.period.to; }).sort().pop();
+  return from <= first && to >= last ? "full" : "partial";
+}
+function lineCovered(st, full, date) {
+  return Object.values(st.files).some(function(f) { return f.account === full && f.period && f.period.from <= date && f.period.to >= date; });
+}
+
+function reconMonth(y, m) {
+  var ym = ymKey(y, m);
+  var st = loadStatements(), reg = loadAccounts(), all = loadPayments();
+  var near = function(d) { return d && d.slice(0, 7) >= ymKey(prevMonthOf(y, m).y, prevMonthOf(y, m).m) && d.slice(0, 7) <= ymKey(m === 12 ? y + 1 : y, m === 12 ? 1 : m + 1); };
+  var lines = st.lines.filter(function(l) { return near(l.date); });
+  var slips = all.filter(function(p) { return near(p.transaction_date); });
+  var mt = matchLines(lines, slips, reg);
+  var byId = {};
+  all.forEach(function(p) { byId[p.id] = p; });
+  var out = { ym: ym, accounts: [], noSlip: [], notInStatement: [], missingStatements: [], counts: { matched: 0, internal: 0, noSlip: 0, resolved: 0 } };
+  var monthLines = lines.filter(function(l) { return l.date.slice(0, 7) === ym; });
+  monthLines.forEach(function(l) {
+    var sid = mt.byLine[l.id];
+    if (l.out > 0) {
+      if (l.resolved && l.resolved.how === "ignored") { l.status = "ignored"; out.counts.resolved++; }
+      else if (sid) { l.status = "matched"; l.slip = byId[sid] ? { id: sid, display_id: showId(byId[sid]) } : { id: sid }; out.counts.matched++; }
+      else if (counterpartyAccount(reg, l)) { l.status = "internal"; out.counts.internal++; }
+      else {
+        l.status = "noSlip"; out.counts.noSlip++;
+        // likely slips: same amount ±10 days, any account (helps when the slip's account was misread)
+        l.candidates = all.filter(function(p) { return !mt.used[p.id] && p.transaction_date && Math.abs((Number(p.amount) || 0) - l.out) < 0.01 && daysApart(p.transaction_date, l.date) <= 10; })
+          .slice(0, 5).map(function(p) { return { id: p.id, display_id: showId(p), date: p.transaction_date, from: (p.bank_from || "") + " ****" + (p.account_from || ""), recipient: p.recipient_name || "" }; });
+        out.noSlip.push(l);
+      }
+    } else l.status = "in";
+  });
+  // slips whose account has a statement for that day but no line matched them
+  all.forEach(function(p) {
+    if (!p.transaction_date || p.transaction_date.slice(0, 7) !== ym || mt.used[p.id] || p.stmt_ok) return;
+    var a = findAccount(reg, p.bank_from, p.account_from);
+    if (!a || !a.full || !lineCovered(st, a.full, p.transaction_date)) return;
+    out.notInStatement.push(p.id);
+  });
+  // accounts that use statements must have one for this month
+  var withFiles = {};
+  Object.values(st.files).forEach(function(f) { if (!withFiles[f.account] || f.period.from < withFiles[f.account]) withFiles[f.account] = f.period.from; });
+  reg.accounts.forEach(function(a) {
+    if (!a.full || !withFiles[a.full]) return;
+    var cov = statementCoverage(st, a.full, ym);
+    var ls = monthLines.filter(function(l) { return l.account === a.full && l.bank === a.bank; });
+    var sum = function(f) { return round2(ls.reduce(function(s, l) { return s + (f(l) || 0); }, 0)); };
+    var info = { label: acctLabelOf(a), bank: a.bank, full: a.full, branch: a.branch, coverage: cov, lines: ls.length,
+      moneyOut: sum(function(l) { return l.out; }), moneyIn: sum(function(l) { return l.in; }),
+      sales: sum(function(l) { return l.in && /ขาย|sale/i.test(l.type) ? l.in : 0; }),
+      matched: ls.filter(function(l) { return l.status === "matched"; }).length,
+      internal: ls.filter(function(l) { return l.status === "internal"; }).length,
+      noSlip: ls.filter(function(l) { return l.status === "noSlip"; }).length };
+    out.accounts.push(info);
+    if (cov !== "full" && withFiles[a.full] <= ym + "-31") out.missingStatements.push(info.label + (cov === "partial" ? " (part of the month only)" : ""));
+  });
+  return out;
+}
+
+// ── Payroll file → split the payroll batch by branch ──
+var MONTHS_EN = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+function payrollMonthFromName(name) {
+  var m = new RegExp("(" + MONTHS_EN.join("|") + ")[^0-9]{0,3}(\\d{4})", "i").exec(name || "");
+  return m ? ymKey(+m[2], MONTHS_EN.indexOf(m[1].toLowerCase()) + 1) : null;
+}
+function importPayroll(text, info) {
+  var ym = payrollMonthFromName(info.name) || info.month;
+  if (!ym) return { ok: false, error: "payroll month unknown — name the file like RCG_Payroll_October_2026.csv" };
+  var rows = parseCsv(text);
+  var h = rows[0].map(function(x) { return String(x).trim().toLowerCase(); });
+  var ix = { name: h.indexOf("name"), nick: h.indexOf("nickname"), branch: h.indexOf("branch"), net: h.indexOf("net pay") };
+  if (ix.branch === -1 || ix.net === -1) return { ok: false, error: "payroll file needs Branch and NET PAY columns" };
+  var people = rows.slice(1).filter(function(r) { return r.length > ix.net; }).map(function(r) {
+    return { name: String(r[ix.name] || "").trim(), nick: ix.nick !== -1 ? String(r[ix.nick] || "").trim() : "", branchRaw: String(r[ix.branch] || "").trim(), net: toNum(r[ix.net]) || 0 };
+  }).filter(function(p) { return p.net > 0; });
+  if (!fs.existsSync(PAYROLL_DIR)) fs.mkdirSync(PAYROLL_DIR, { recursive: true });
+  fs.writeFileSync(path.join(PAYROLL_DIR, ym + ".json"), JSON.stringify({ ym: ym, file: info.name || "", importedAt: new Date().toISOString(), people: people }, null, 2));
+  return { ok: true, kind: "payroll_csv", month: ym, people: people.length, total: round2(people.reduce(function(s, p) { return s + p.net; }, 0)) };
+}
+function payrollBranch(raw, reg, pnl) {
+  var map = pnl.payrollBranchMap || {};
+  if (map[raw] && reg.branches.indexOf(map[raw]) !== -1) return map[raw];
+  var hit = reg.branches.find(function(b) { return raw.toLowerCase().indexOf(b.toLowerCase()) !== -1; });
+  if (hit) return hit;
+  if (/สำนักงานใหญ่|head ?office|\bhq\b/i.test(raw) && pnl.hqBranches.length) return pnl.hqBranches[0];
+  return null;
+}
+function isSalary(p) { return /salary|เงินเดือน|payroll/i.test((p.category || "") + " " + (p.purpose || "")); }
+// individual transfers = exact NET PAY of one person; the biggest remaining salary payment = the batch
+function payrollPlan(y, m) {
+  var ym = ymKey(y, m);
+  var f = path.join(PAYROLL_DIR, ym + ".json");
+  if (!fs.existsSync(f)) return { ym: ym, imported: false };
+  var pr = JSON.parse(fs.readFileSync(f, "utf8"));
+  var reg = loadAccounts(), pnl = loadPnl();
+  var people = pr.people.map(function(p) { return Object.assign({}, p, { branch: payrollBranch(p.branchRaw, reg, pnl) }); });
+  var unmapped = {};
+  people.forEach(function(p) { if (!p.branch) unmapped[p.branchRaw] = true; });
+  var pays = loadPayments().filter(function(p) { return costYm(p) === ym && classify(p, reg).kind === "expense" && isSalary(p); });
+  var left = people.slice(), individual = [];
+  pays.slice().sort(function(a, b) { return a.amount - b.amount; }).forEach(function(p) {
+    var hits = left.filter(function(x) { return Math.abs(x.net - (Number(p.amount) || 0)) < 0.01; });
+    if (hits.length === 1) { individual.push({ slipId: p.id, display_id: showId(p), amount: Number(p.amount), person: hits[0].nick || hits[0].name, branch: hits[0].branch }); left.splice(left.indexOf(hits[0]), 1); }
+  });
+  var rest = pays.filter(function(p) { return !individual.some(function(i) { return i.slipId === p.id; }); }).sort(function(a, b) { return b.amount - a.amount; });
+  var batch = null;
+  if (rest.length) {
+    var b = rest[0], netLeft = left.reduce(function(s, p) { return s + p.net; }, 0);
+    var byB = {};
+    left.forEach(function(p) { var k = p.branch || "?"; byB[k] = (byB[k] || 0) + p.net; });
+    var scale = netLeft > 0 ? Number(b.amount) / netLeft : 0;
+    batch = { slipId: b.id, display_id: showId(b), amount: Number(b.amount), netLeft: round2(netLeft), diff: round2(Number(b.amount) - netLeft),
+      alloc: Object.keys(byB).map(function(k) { return { branch: k, net: round2(byB[k]), amount: round2(byB[k] * scale) }; }) };
+  }
+  var byBranch = {};
+  people.forEach(function(p) { var k = p.branch || "?"; byBranch[k] = round2((byBranch[k] || 0) + p.net); });
+  return { ym: ym, imported: true, file: pr.file, importedAt: pr.importedAt, people: people.length, total: round2(people.reduce(function(s, p) { return s + p.net; }, 0)),
+    byBranch: byBranch, unmapped: Object.keys(unmapped), individual: individual, batch: batch, applied: pays.some(function(p) { return p.payroll_ym === ym; }), branches: reg.branches };
+}
+function applyPayroll(y, m) {
+  var plan = payrollPlan(y, m);
+  if (!plan.imported) return { ok: false, error: "no payroll file for this month" };
+  if (plan.unmapped.length) return { ok: false, error: "match these payroll branches first: " + plan.unmapped.join(", ") };
+  var reg = loadAccounts(), list = loadPayments();
+  var setSplit = function(id, alloc) {
+    var p = list.find(function(x) { return x.id === id; });
+    if (!p) return;
+    var home = classify(p, reg).fromBranch || NO_BRANCH;
+    var split = alloc.filter(function(a) { return a.branch !== home && a.amount > 0.009; }).map(function(a) { return { branch: a.branch, amount: a.amount }; });
+    if (split.length) p.split = split; else delete p.split;
+    p.payroll_ym = plan.ym;
+  };
+  plan.individual.forEach(function(i) { setSplit(i.slipId, [{ branch: i.branch, amount: i.amount }]); });
+  if (plan.batch) {
+    setSplit(plan.batch.slipId, plan.batch.alloc);
+    // links from internal transfers moved shares of this slip before — the payroll file replaces them
+    list.forEach(function(t) { if (String(t.linked_to) === String(plan.batch.slipId)) { t.linked_to_replaced = t.linked_to; delete t.linked_to; } });
+  }
+  savePayments(list);
+  return { ok: true, plan: payrollPlan(y, m) };
+}
+
+// ── Google Drive (service account, read-only, only folders shared with it) ──
+function driveCreds() { try { return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || ""); } catch (e) { return null; } }
+var DRIVE_API = process.env.DRIVE_API_URL || "https://www.googleapis.com/drive/v3";
+var driveTok = null;
+function b64url(x) { return Buffer.from(x).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_"); }
+async function driveToken() {
+  if (driveTok && driveTok.exp > Date.now() + 60000) return driveTok.token;
+  var c = driveCreds();
+  if (!c || !c.client_email || !c.private_key) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not set on the server");
+  var now = Math.floor(Date.now() / 1000), aud = c.token_uri || "https://oauth2.googleapis.com/token";
+  var unsigned = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" })) + "." + b64url(JSON.stringify({ iss: c.client_email, scope: "https://www.googleapis.com/auth/drive.readonly", aud: aud, iat: now, exp: now + 3600 }));
+  var sig = crypto.createSign("RSA-SHA256").update(unsigned).sign(c.private_key, "base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+  var r = await axios.post(aud, "grant_type=" + encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer") + "&assertion=" + unsigned + "." + sig, { headers: { "content-type": "application/x-www-form-urlencoded" } });
+  driveTok = { token: r.data.access_token, exp: Date.now() + (r.data.expires_in || 3600) * 1000 };
+  return driveTok.token;
+}
+async function driveListAll(folderId) {
+  var tok = await driveToken(), files = [], queue = [{ id: folderId, path: "" }], guard = 0;
+  while (queue.length && guard++ < 200) {
+    var f = queue.shift(), pageToken = null;
+    do {
+      var r = await axios.get(DRIVE_API + "/files", { headers: { Authorization: "Bearer " + tok }, params: {
+        q: "'" + f.id + "' in parents and trashed=false", fields: "nextPageToken,files(id,name,mimeType,modifiedTime,size)",
+        pageSize: 200, pageToken: pageToken || undefined, supportsAllDrives: true, includeItemsFromAllDrives: true } });
+      (r.data.files || []).forEach(function(x) {
+        if (x.mimeType === "application/vnd.google-apps.folder") queue.push({ id: x.id, path: f.path + x.name + "/" });
+        else files.push(Object.assign({ path: f.path + x.name }, x));
+      });
+      pageToken = r.data.nextPageToken;
+    } while (pageToken);
+  }
+  return files;
+}
+async function driveDownload(id) {
+  var r = await axios.get(DRIVE_API + "/files/" + id, { headers: { Authorization: "Bearer " + await driveToken() }, params: { alt: "media", supportsAllDrives: true }, responseType: "arraybuffer" });
+  return Buffer.from(r.data);
+}
+function driveFolderId(link) { var m = /folders\/([\w-]{10,})/.exec(link || "") || /^([\w-]{10,})$/.exec(String(link || "").trim()); return m ? m[1] : null; }
+var driveSyncing = false;
+async function driveSync() {
+  if (driveSyncing) return { ok: false, error: "sync already running" };
+  var folder = loadSettings().driveFolderId;
+  if (!folder) return { ok: false, error: "no Drive folder set" };
+  driveSyncing = true;
+  var results = [];
+  try {
+    var files = await driveListAll(folder);
+    var st = loadStatements();
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      if (st.drive[f.id] === f.modifiedTime) continue; // unchanged since last sync
+      var isCsv = /\.csv$/i.test(f.name) || f.mimeType === "text/csv";
+      var r;
+      if (isCsv && Number(f.size || 0) < 5e6) {
+        try { r = importStatement(decodeText(await driveDownload(f.id)), { name: f.name, source: "drive", driveId: f.id }); }
+        catch (e) { r = { ok: false, error: e.message }; }
+      } else if (/\.pdf$/i.test(f.name) || f.mimeType === "application/pdf") r = { ok: false, skipped: true, error: "PDF statements: coming in the next update" };
+      else r = { ok: false, skipped: true, error: "not a statement file" };
+      results.push(Object.assign({ file: f.path }, r));
+      st = loadStatements();
+      if (r.ok || r.skipped) { st.drive[f.id] = f.modifiedTime; saveStatements(st); }
+    }
+    var s2 = loadSettings();
+    s2.driveLastSync = new Date().toISOString();
+    s2.driveLastResults = results.filter(function(x) { return !x.skipped; }).slice(-30);
+    saveSettings(s2);
+    return { ok: true, checked: files.length, results: results };
+  } catch (e) {
+    var msg = e.response && e.response.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message;
+    console.error("Drive sync:", msg);
+    return { ok: false, error: msg };
+  } finally { driveSyncing = false; }
+}
+function driveAutoSync() {
+  var s = loadSettings();
+  if (!driveCreds() || !s.driveFolderId) return;
+  if (s.driveLastSync && Date.now() - Date.parse(s.driveLastSync) < 6 * 3600 * 1000) return;
+  driveSync().catch(function() {});
+}
+
 // ── Month helpers / readiness check ────────────────────────────────────────
 var TH_MONTHS = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
 function thMonth(y, m) { return TH_MONTHS[m - 1] + " " + y; }
@@ -712,14 +1146,20 @@ function checkMonth(y, m) {
     if (d) r.duplicates.push({ id: p.id, display_id: showId(p), of: showId(d), date: p.transaction_date, amount: Number(p.amount) || 0, recipient: p.recipient_name || "" });
     if (recipientLooksLikeSender(p, reg)) r.recipientUnclear.push(showId(p));
   });
-  r.ready = !r.missingBill.length && !r.noCategory.length && !r.pendingInternal.length && !r.unassigned.length && !r.noDate.length && !r.suspectDate.length && !r.duplicates.length && !r.recipientUnclear.length;
+  // bank statements: money out with no slip, slips the bank never shows, accounts without this month's statement
+  var rc = reconMonth(y, m);
+  r.stmtNoSlip = rc.noSlip.map(function(l) { return { id: l.id, date: l.date, time: l.time, amount: l.out, account: acctLabelOf(lineAccount(reg, l)), desc: l.desc, counterparty: l.counterparty, candidates: l.candidates }; });
+  r.notInStatement = rc.notInStatement.map(function(id) { var p = all.find(function(x) { return x.id === id; }); return p ? showId(p) : String(id); });
+  r.missingStatements = rc.missingStatements;
+  r.ready = !r.missingBill.length && !r.noCategory.length && !r.pendingInternal.length && !r.unassigned.length && !r.noDate.length && !r.suspectDate.length && !r.duplicates.length && !r.recipientUnclear.length &&
+    !r.stmtNoSlip.length && !r.notInStatement.length && !r.missingStatements.length;
   // numeric ids per problem + the records themselves (web page shows picture / details and fixes in place)
   var byShow = {};
   all.forEach(function(p) { byShow[showId(p)] = p; });
   var toIds = function(arr) { return arr.map(function(d) { return byShow[d] ? byShow[d].id : null; }).filter(function(x) { return x !== null; }); };
   r.items = {
     missingBill: toIds(r.missingBill), noCategory: toIds(r.noCategory), pendingInternal: toIds(r.pendingInternal),
-    noDate: toIds(r.noDate), recipientUnclear: toIds(r.recipientUnclear),
+    noDate: toIds(r.noDate), recipientUnclear: toIds(r.recipientUnclear), notInStatement: toIds(r.notInStatement),
     duplicates: r.duplicates.map(function(d) { return [d.id, byShow[d.of] ? byShow[d.of].id : null]; })
   };
   var need = {};
@@ -885,6 +1325,9 @@ function readinessText(r) {
   if (r.noDate.length) lines.push("📅 ไม่มีวันที่: " + r.noDate.length + " — " + idList(r.noDate));
   if (r.duplicates.length) lines.push("♊ อาจซ้ำ: " + r.duplicates.length + " — " + r.duplicates.slice(0, 6).map(function(d) { return "#" + d.display_id + "=#" + d.of; }).join(" ") + (r.duplicates.length > 6 ? " +" + (r.duplicates.length - 6) : ""));
   if (r.recipientUnclear.length) lines.push("❓ ผู้รับไม่ชัด: " + r.recipientUnclear.length + " — " + idList(r.recipientUnclear));
+  if (r.stmtNoSlip.length) lines.push("🏦 มีใน statement แต่ไม่มีสลิป: " + r.stmtNoSlip.length + " รายการ (" + baht(r.stmtNoSlip.reduce(function(s, l) { return s + l.amount; }, 0)) + ")");
+  if (r.notInStatement.length) lines.push("🔍 สลิปที่ไม่เจอใน statement: " + r.notInStatement.length + " — " + idList(r.notInStatement));
+  if (r.missingStatements.length) lines.push("📄 ยังไม่มี statement: " + r.missingStatements.join(", "));
   if (r.suspectDate.length) lines.push("📅 ปีน่าสงสัย (ห่างจากวันอัปโหลด): " + r.suspectDate.length + " — " + idList(r.suspectDate.map(function(x) { return x.display_id; })));
   if (r.unassigned.length) lines.push("🆕 บัญชียังไม่ระบุสาขา: " + r.unassigned.slice(0, 5).join(", ") + (r.unassigned.length > 5 ? " +" + (r.unassigned.length - 5) : ""));
   if (r.pendingInternal.length) lines.push("🔁 รอยืนยันโอนภายใน: " + r.pendingInternal.length + " — " + idList(r.pendingInternal));
@@ -1618,6 +2061,86 @@ app.get("/api/slips", auth, function(req, res) {
   }));
 });
 
+// ── Bank statements & payroll ──
+// upload one file (CSV) from the web app: { name, data: base64, month?: "YYYY-MM" for payroll }
+app.post("/api/statements/upload", auth, function(req, res) {
+  try {
+    var b = req.body || {};
+    var buf = Buffer.from(String(b.data || "").replace(/^data:[^,]*,/, ""), "base64");
+    if (!buf.length) return res.status(400).json({ error: "empty file" });
+    if (/\.pdf$/i.test(b.name || "")) return res.json({ ok: false, skipped: true, error: "PDF statements: coming in the next update" });
+    res.json(importStatement(decodeText(buf), { name: b.name, source: "upload", month: b.month }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get("/api/statements", auth, function(req, res) {
+  var pm = prevMonthOf(bkkNow().y, bkkNow().m);
+  var y = parseInt(req.query.year) || pm.y, m = parseInt(req.query.month) || pm.m;
+  var rc = reconMonth(y, m), st = loadStatements();
+  res.json({ recon: { ym: rc.ym, accounts: rc.accounts, counts: rc.counts, missingStatements: rc.missingStatements },
+    files: Object.values(st.files).sort(function(a, b) { return (b.importedAt || "").localeCompare(a.importedAt || ""); }).slice(0, 40) });
+});
+// money-out line without a slip: record it (creates a transaction), point it to a slip, or set it aside with a note
+app.post("/api/statements/line/:id", auth, function(req, res) {
+  var st = loadStatements();
+  var l = st.lines.find(function(x) { return x.id === req.params.id; });
+  if (!l) return res.status(404).json({ error: "line not found" });
+  var a = req.body.action;
+  if (a === "record") {
+    var reg = loadAccounts(), acct = lineAccount(reg, l), cp = l.counterparty || {};
+    var list = loadPayments();
+    var rec = { id: nextNumericId(), display_id: nextDisplayId(l.date), imageFile: null, billFile: null, savedAt: new Date().toISOString(), source: "statement", stmt_line: l.id,
+      bank_from: acct ? acct.bank : l.bank, account_from: l.account, transaction_date: l.date, transaction_time: l.time, amount: l.out,
+      recipient_name: cp.name || l.desc, bank_to: cp.bill ? null : (cp.bank || null), account_to: cp.digits || null, purpose: null, category: null };
+    var vm = vendorCategoryMap()[vendorKey(rec.recipient_name)];
+    if (vm) rec.category = vm;
+    list.push(rec);
+    savePayments(list);
+    l.resolved = { how: "recorded", slipId: rec.id, at: new Date().toISOString() };
+    saveStatements(st);
+    return res.json({ ok: true, record: rec });
+  }
+  if (a === "match") {
+    var p = loadPayments().find(function(x) { return String(x.id) === String(req.body.slipId); });
+    if (!p) return res.status(404).json({ error: "slip not found" });
+    l.slipId = p.id;
+    delete l.resolved;
+    saveStatements(st);
+    return res.json({ ok: true });
+  }
+  if (a === "ignore") {
+    var note = String(req.body.note || "").trim();
+    if (!note) return res.status(400).json({ error: "say why (e.g. refund, moved between own accounts)" });
+    l.resolved = { how: "ignored", note: note, at: new Date().toISOString() };
+    saveStatements(st);
+    return res.json({ ok: true });
+  }
+  if (a === "reset") { delete l.slipId; delete l.resolved; saveStatements(st); return res.json({ ok: true }); }
+  res.status(400).json({ error: "unknown action" });
+});
+app.get("/api/payroll", auth, function(req, res) {
+  var pm = prevMonthOf(bkkNow().y, bkkNow().m);
+  res.json(payrollPlan(parseInt(req.query.year) || pm.y, parseInt(req.query.month) || pm.m));
+});
+app.post("/api/payroll/apply", auth, function(req, res) { res.json(applyPayroll(parseInt(req.body.year), parseInt(req.body.month))); });
+app.post("/api/payroll/branch-map", auth, function(req, res) {
+  var pnl = loadPnl();
+  if (!pnl.payrollBranchMap) pnl.payrollBranchMap = {};
+  if (req.body.branch) pnl.payrollBranchMap[String(req.body.raw)] = String(req.body.branch); else delete pnl.payrollBranchMap[String(req.body.raw)];
+  savePnl(pnl);
+  res.json({ ok: true });
+});
+app.get("/api/drive", auth, function(req, res) {
+  var c = driveCreds(), s = loadSettings();
+  res.json({ configured: !!(c && c.client_email), email: c ? c.client_email : null, folderId: s.driveFolderId || null, lastSync: s.driveLastSync || null, lastResults: s.driveLastResults || [] });
+});
+app.post("/api/drive/folder", auth, function(req, res) {
+  var id = driveFolderId(req.body.link);
+  if (!id) return res.status(400).json({ error: "paste the folder link from Google Drive" });
+  var s = loadSettings(); s.driveFolderId = id; saveSettings(s);
+  res.json({ ok: true, folderId: id });
+});
+app.post("/api/drive/sync", auth, async function(req, res) { res.json(await driveSync()); });
+
 // ── P&L dashboard ──
 app.get("/api/pnl", auth, function(req, res) {
   var pm = prevMonthOf(bkkNow().y, bkkNow().m);
@@ -1709,6 +2232,7 @@ app.post("/api/accounts", auth, function(req, res) {
     return {
       bank: bank, last4: l4,
       alt: clean(a.alt).map(last4).filter(Boolean),
+      full: String(a.full || "").replace(/\D/g, "").length >= 8 ? String(a.full).replace(/\D/g, "") : null,
       branch: branches.indexOf(a.branch) !== -1 ? a.branch : null,
       type: ACCT_TYPES.indexOf(a.type) !== -1 ? a.type : "company",
       label: String(a.label || "").trim(),
@@ -2115,7 +2639,7 @@ app.patch("/api/slips/:id", auth, function(req, res) {
   var list = loadPayments();
   var idx = list.findIndex(function(p) { return String(p.id) === String(req.params.id); });
   if (idx === -1) return res.status(404).json({ error: "not found" });
-  var allowed = ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number","category","evidence_note","date_ok","dup_ok","recipient_ok","cost_type","cost_month"];
+  var allowed = ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number","category","evidence_note","date_ok","dup_ok","recipient_ok","cost_type","cost_month","stmt_ok"];
   var newName = req.body.recipient_name;
   if (newName !== undefined && newName && list[idx].recipient_name && newName !== list[idx].recipient_name && !list[idx].recipient_read) {
     list[idx].recipient_read = list[idx].recipient_name; // what the AI read — used to auto-correct the same misread next time
@@ -2187,8 +2711,9 @@ if (require.main === module) {
   app.listen(PORT, function() {
     console.log("✅ Slip Tracker v8 running on port " + PORT);
     setTimeout(function() { scheduleTick(); }, 30 * 1000);
-    setInterval(function() { scheduleTick(); }, 10 * 60 * 1000);
+    setInterval(function() { scheduleTick(); driveAutoSync(); }, 10 * 60 * 1000);
   });
 }
 // exported for offline test scripts only
-module.exports = { app: app, client: client, classify: classify, loadAccounts: loadAccounts, checkMonth: checkMonth, monthTotals: monthTotals, makeReport: makeReport, scheduleTick: scheduleTick, linkSuggestions: linkSuggestions, nameMatchesAlias: nameMatchesAlias, readinessText: readinessText, reportReadyText: reportReadyText, suggestYearFix: suggestYearFix, suspectDates: suspectDates, duplicateOf: duplicateOf, similarToAccount: similarToAccount, correctedName: correctedName, pnlMonth: pnlMonth, loadPnl: loadPnl };
+module.exports = { app: app, client: client, classify: classify, loadAccounts: loadAccounts, checkMonth: checkMonth, monthTotals: monthTotals, makeReport: makeReport, scheduleTick: scheduleTick, linkSuggestions: linkSuggestions, nameMatchesAlias: nameMatchesAlias, readinessText: readinessText, reportReadyText: reportReadyText, suggestYearFix: suggestYearFix, suspectDates: suspectDates, duplicateOf: duplicateOf, similarToAccount: similarToAccount, correctedName: correctedName, pnlMonth: pnlMonth, loadPnl: loadPnl,
+  importStatement: importStatement, reconMonth: reconMonth, payrollPlan: payrollPlan, applyPayroll: applyPayroll, driveSync: driveSync, parseCounterparty: parseCounterparty, loadStatements: loadStatements };
