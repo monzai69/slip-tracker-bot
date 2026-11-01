@@ -131,6 +131,18 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
 .rdy-verdict.ok{background:#E8F5E9;color:var(--green);}
 .sv-img{width:100%;max-height:360px;object-fit:contain;background:#F7F9FF;border-radius:8px;cursor:zoom-in;}
 .sv-tbl tr{border-bottom:1px solid var(--border);}
+.pl-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;}
+.pl-card{background:#fff;border:1px solid var(--border);border-radius:14px;padding:12px;}
+.pl-card h4{font-size:15px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:baseline;}
+.pl-line{display:flex;justify-content:space-between;font-size:13px;padding:2px 0;}
+.pl-line.sub{color:var(--text2);font-size:12px;padding-left:10px;}
+.pl-line.total{border-top:1px solid var(--border);margin-top:4px;padding-top:6px;font-weight:700;}
+.pl-profit{font-size:20px;font-weight:700;}
+.pos{color:var(--green);} .neg{color:var(--red);}
+.warn{background:#FFF8E1;border:1px solid #FFE082;border-radius:10px;padding:8px 10px;margin-top:8px;font-size:12px;}
+.ct-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:13px;}
+.ct-row select{width:auto;padding:6px 8px;font-size:12px;}
+.type-chip{font-size:10px;padding:1px 6px;border-radius:8px;background:#EEF2FA;color:var(--text2);margin-left:4px;}
 </style>
 </head>
 <body>
@@ -233,6 +245,41 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
     </div>
   </div>
 
+  <!-- P&L DASHBOARD -->
+  <div class="view hidden" id="view-dash">
+    <div class="row"><select id="dashMonth" onchange="loadDash()" style="flex:1"></select></div>
+    <div class="small mt" id="dashCaveat"></div>
+    <div id="dashWarn"></div>
+    <div id="dashCards" class="mt"></div>
+    <div class="section-title">📊 Sales vs cost</div>
+    <div class="card"><canvas id="chBar" height="230"></canvas></div>
+    <div class="section-title">📈 Last 6 months</div>
+    <div class="card"><canvas id="chTrend" height="230"></canvas></div>
+    <div class="section-title">🧾 Cost as % of sales</div>
+    <div id="dashCats"></div>
+    <div class="section-title">💰 Sales this month (ยอดขาย)</div>
+    <div class="card">
+      <div id="revInputs"></div>
+      <button class="btn btn-green btn-full" onclick="saveRevenue()">💾 Save sales</button>
+      <div class="small mt">Or in LINE: /revenue 2026 10 Samui 2010869</div>
+    </div>
+    <div class="section-title">🏢 HQ cost sharing this month</div>
+    <div class="card">
+      <div class="small" id="hqNote"></div>
+      <div id="hqBranchBoxes" class="mt"></div>
+      <select id="allocMode" class="mt" onchange="renderAllocPct()">
+        <option value="revenue">By sales share (recommended)</option>
+        <option value="equal">Equal</option>
+        <option value="custom">Custom %</option>
+      </select>
+      <div id="allocPct" class="mt"></div>
+      <button class="btn btn-blue btn-full" onclick="saveAlloc()">💾 Save sharing for this month</button>
+      <div class="small mt">Saved per month — changing a later month never changes this one.</div>
+    </div>
+    <div class="section-title">🏷 Fixed / variable by category</div>
+    <div class="card"><div id="costTypeRows"></div><div class="small mt">"Not classified" counts as fixed until you choose. A single slip can be changed in ✏️ Edit.</div></div>
+  </div>
+
   <!-- REPORT -->
   <div class="view hidden" id="view-report">
     <div class="card">
@@ -294,6 +341,7 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
     <div class="tab" data-v="upload" onclick="switchTab('upload')"><span class="ico">📸</span>Upload</div>
     <div class="tab" data-v="stats" onclick="switchTab('stats')"><span class="ico">📈</span>Stats</div>
     <div class="tab" data-v="report" onclick="switchTab('report')"><span class="ico">📊</span>Report</div>
+    <div class="tab" data-v="dash" onclick="switchTab('dash')"><span class="ico">💹</span>P&amp;L</div>
   </div>
 </div>
 
@@ -411,7 +459,7 @@ function login() {
     })
     .catch(function(){ document.getElementById("loginErr").textContent = "Connection error"; });
 }
-function logout() { TOKEN=""; localStorage.removeItem("st_token"); showLogin(); }
+function logout() { fetch("/api/logout",{method:"POST",headers:{"x-auth":TOKEN}}).catch(function(){}); TOKEN=""; localStorage.removeItem("st_token"); showLogin(); }
 function showLogin() { document.getElementById("loginView").classList.remove("hidden"); document.getElementById("appView").classList.add("hidden"); }
 var CATS = [];
 function loadCats(cb) {
@@ -420,6 +468,8 @@ function loadCats(cb) {
 function showApp() {
   document.getElementById("loginView").classList.add("hidden");
   document.getElementById("appView").classList.remove("hidden");
+  // pictures and downloads are login-only now: make sure this browser has the session cookie
+  fetch("/api/session",{headers:{"x-auth":TOKEN}}).then(function(){ document.querySelectorAll("img[src^='/slips/'],img[src^='/bills/']").forEach(function(im){ var s0=im.src; im.src=""; im.src=s0; }); });
   initMonthPickers();
   loadCats();
   loadAccounts(fillBranchSelect);
@@ -437,6 +487,7 @@ function switchTab(v) {
   if (v==="match") loadMatch();
   if (v==="stats") loadCats(function(){ loadAccounts(function(){ fillBranchSelect(); loadStats(); }); });
   if (v==="report") loadAccounts(function(){ renderAccounts(); loadReadiness(); });
+  if (v==="dash") loadCats(loadDash);
 }
 
 // ── Inbox ──
@@ -586,6 +637,16 @@ function initMonthPickers() {
   }
   var oAll=document.createElement("option"); oAll.value="all"; oAll.textContent="All months"; mm.appendChild(oAll);
   var oNd=document.createElement("option"); oNd.value="nodate"; oNd.textContent="⚠️ No date"; mm.appendChild(oNd);
+  var dm = document.getElementById("dashMonth");
+  dm.innerHTML = "";
+  for (var di=1; di<15; di++) {
+    var dd = new Date(now.getFullYear(), now.getMonth()-di+1, 1);
+    var dop = document.createElement("option");
+    dop.value = dd.getFullYear()+"-"+(dd.getMonth()+1);
+    dop.textContent = dd.toLocaleDateString("en-US",{month:"long",year:"numeric"});
+    dm.appendChild(dop);
+  }
+  dm.selectedIndex = 1; // last month
   var sm = document.getElementById("statsMonth");
   sm.innerHTML = "";
   for (var si=0; si<14; si++) {
@@ -886,7 +947,10 @@ function openEdit(id) {
   var iv = p.internal===true?"yes":(p.internal===false?"no":"auto");
   var intOpts = [["auto","🤖 Automatic (by account)"],["yes","🔁 Internal transfer — not counted"],["no","💰 Real expense"]].map(function(o){ return '<option value="'+o[0]+'"'+(iv===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join("");
   document.getElementById("editFields").innerHTML = '<div class="field"><label>Category</label><select id="ef_category">'+catOpts+'</select></div>' +
-    '<div class="field"><label>Internal transfer?</label><select id="ef_internal" data-was="'+iv+'">'+intOpts+'</select></div>' + fields.map(function(f) {
+    '<div class="field"><label>Internal transfer?</label><select id="ef_internal" data-was="'+iv+'">'+intOpts+'</select></div>' +
+    '<div class="acct-row" style="margin:0 0 10px"><div class="field" style="margin:0"><label>Cost type (P&L)</label><select id="ef_cost_type">'+
+      [["","🤖 By category"],["fixed","Fixed"],["variable","Variable"],["capex","Investment (capex)"],["unset","Not classified"]].map(function(o){ return '<option value="'+o[0]+'"'+((p.cost_type||"")===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join("")+
+    '</select></div><div class="field" style="margin:0"><label>Cost month (blank = slip date)</label><input id="ef_cost_month" type="month" value="'+esc(p.cost_month||"")+'"></div></div>' + fields.map(function(f) {
     return '<div class="field"><label>'+f[1]+'</label><input id="ef_'+f[0]+'" type="'+f[2]+'" value="'+((p[f[0]]!==null&&p[f[0]]!==undefined)?esc(p[f[0]]):"")+'"></div>';
   }).join("");
   if (p.recipient_read && p.recipient_read !== p.recipient_name) document.getElementById("editFields").insertAdjacentHTML("afterbegin", '<div class="small" style="margin-bottom:8px">✏️ AI first read the recipient as "'+esc(p.recipient_read)+'" — remembered, so the same misread is corrected automatically next time.</div>');
@@ -902,6 +966,8 @@ function saveEdit() {
   });
   var cv = document.getElementById("ef_category").value;
   body.category = cv===""?null:cv;
+  body.cost_type = document.getElementById("ef_cost_type").value || null;
+  body.cost_month = document.getElementById("ef_cost_month").value || null;
   var ie = document.getElementById("ef_internal");
   var id = editId;
   api("PATCH","/api/slips/"+id, body).then(function(){
@@ -1371,6 +1437,128 @@ function delDup(id, did) {
 }
 function dateOk(id) {
   api("PATCH","/api/slips/"+id,{date_ok:true}).then(function(){ toast("✅ Kept"); loadReadiness(); });
+}
+
+// ── P&L dashboard ──
+var DASH = null, PNLSET = null, CHARTS = {};
+var CLR = { revenue:"#1565C0", variable:"#E65100", fixed:"#5E35B1", unset:"#9E9E9E", profit:"#2E7D32" };
+function loadChartJs(cb) {
+  if (window.Chart) return cb();
+  var sc = document.createElement("script");
+  sc.src = "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js";
+  sc.onload = cb; sc.onerror = function(){ toast("⚠️ Charts could not load — numbers still shown"); };
+  document.head.appendChild(sc);
+}
+function pct(x){ return x===null||x===undefined ? "–" : (x*100).toFixed(1)+"%"; }
+function dashYM(){ var v = document.getElementById("dashMonth").value.split("-"); return { y:+v[0], m:+v[1] }; }
+function loadDash() {
+  var ym = dashYM();
+  Promise.all([api("GET","/api/pnl?year="+ym.y+"&month="+ym.m), api("GET","/api/pnl/settings")]).then(function(r) {
+    DASH = r[0]; PNLSET = r[1];
+    var P = DASH.pnl;
+    document.getElementById("dashCaveat").textContent = "ℹ️ "+P.caveat;
+    document.getElementById("dashWarn").innerHTML = P.warnings.map(function(w){ return '<div class="warn">⚠️ '+esc(w)+'</div>'; }).join("");
+    var line = function(lbl, v, cls){ return '<div class="pl-line'+(cls?' '+cls:'')+'"><span>'+lbl+'</span><span>'+v+'</span></div>'; };
+    var card = function(b, title, isCo) {
+      var cost = b.variable + b.fixed + b.unset;
+      return '<div class="pl-card"><h4><span>'+esc(title)+'</span><span class="pl-profit '+(b.profit>=0?'pos':'neg')+'">'+fmtB(b.profit)+'</span></h4>'+
+        '<div class="small" style="margin-bottom:6px">operating profit '+pct(b.profitPct)+'</div>'+
+        line("Sales", fmtB(b.revenue))+
+        line("Variable cost", fmtB(b.variable))+
+        (isCo?'':line("Contribution margin", fmtB(b.cm)+" ("+pct(b.cmPct)+")", "total"))+
+        line("Fixed cost", fmtB(b.fixed))+
+        (b.unset? line("Not classified", fmtB(b.unset)) : '')+
+        (isCo?'':line("of which HQ share ("+b.hqSharePct.toFixed(1)+"%)", fmtB(b.hqShare), "sub"))+
+        line("Total cost", fmtB(cost), "total")+
+        (isCo?'':line("Break-even sales", b.breakeven===null?"–":fmtB(b.breakeven))+line("Margin of safety", pct(b.mos)))+
+        (b.capex? line("Investment (not in profit)", fmtB(b.capex), "sub") : '')+
+      '</div>';
+    };
+    document.getElementById("dashCards").innerHTML = '<div class="pl-grid">'+P.branches.map(function(b){ return card(b, "🏢 "+b.branch); }).join("")+
+      (P.branches.length>1 ? card(P.company, "🏦 Company", true) : '')+'</div>';
+    // cost % of sales table
+    var cats = {};
+    P.branches.forEach(function(b){ b.cats.forEach(function(c){ if(!cats[c.category]) cats[c.category]={type:c.type,total:0}; cats[c.category].total+=c.amount; }); });
+    var catKeys = Object.keys(cats).sort(function(a,b){ return cats[b].total-cats[a].total; });
+    document.getElementById("dashCats").innerHTML = catKeys.length ? '<table class="stats-table"><tr><th>Category</th>'+P.branches.map(function(b){ return '<th>'+esc(b.branch)+'</th>'; }).join("")+'</tr>'+
+      catKeys.map(function(k){
+        return '<tr><td>'+esc(k.split("/")[0])+'<span class="type-chip">'+esc(cats[k].type)+'</span></td>'+P.branches.map(function(b){
+          var c = b.cats.find(function(x){ return x.category===k; });
+          return '<td class="num">'+(c? (c.pctOfRevenue!==null? pct(c.pctOfRevenue) : '') + '<div class="small">'+fmtB(c.amount)+'</div>' : '–')+'</td>';
+        }).join("")+'</tr>';
+      }).join("")+'</table>' : '<div class="empty small">No costs this month</div>';
+    renderRevenueInputs(); renderHq(); renderCostTypes();
+    loadChartJs(drawDashCharts);
+  });
+}
+function drawDashCharts() {
+  var P = DASH.pnl;
+  Object.keys(CHARTS).forEach(function(k){ CHARTS[k].destroy(); });
+  var labels = P.branches.map(function(b){ return b.branch; });
+  var ds = function(lbl, key, stack){ return { label: lbl, data: P.branches.map(function(b){ return b[key]; }), backgroundColor: CLR[key], stack: stack }; };
+  CHARTS.bar = new Chart(document.getElementById("chBar"), { type: "bar",
+    data: { labels: labels, datasets: [ds("Sales","revenue","s"), ds("Variable","variable","c"), ds("Fixed","fixed","c"), ds("Not classified","unset","c")] },
+    options: { responsive: true, plugins: { legend: { position: "bottom" } }, scales: { x: { stacked: true }, y: { stacked: true, ticks: { callback: function(v){ return (v/1000).toLocaleString()+"k"; } } } } } });
+  var T = DASH.trend;
+  var tl = T.map(function(t){ return t.ym; });
+  // months without sales entered are left blank (profit would be meaningless)
+  var has = function(t){ return t.company.revenue > 0; };
+  var sets = [
+    { label: "Sales", data: T.map(function(t){ return has(t) ? t.company.revenue : null; }), borderColor: CLR.revenue, backgroundColor: CLR.revenue },
+    { label: "Total cost", data: T.map(function(t){ return has(t) ? t.company.variable+t.company.fixed+t.company.unset : null; }), borderColor: CLR.variable, backgroundColor: CLR.variable },
+    { label: "Profit", data: T.map(function(t){ return has(t) ? t.company.profit : null; }), borderColor: CLR.profit, backgroundColor: CLR.profit }
+  ];
+  CHARTS.trend = new Chart(document.getElementById("chTrend"), { type: "line", data: { labels: tl, datasets: sets },
+    options: { responsive: true, plugins: { legend: { position: "bottom" } }, scales: { y: { ticks: { callback: function(v){ return (v/1000).toLocaleString()+"k"; } } } } } });
+}
+function opBranches() { return PNLSET.branches.filter(function(b){ return PNLSET.hqBranches.indexOf(b)===-1; }); }
+function renderRevenueInputs() {
+  var rev = DASH.revenue || {};
+  document.getElementById("revInputs").innerHTML = opBranches().map(function(b){
+    return '<div class="field"><label>'+esc(b)+'</label><input inputmode="decimal" class="rev-in" data-b="'+esc(b)+'" value="'+(rev[b]!=null?rev[b]:"")+'" placeholder="0"></div>';
+  }).join("") || '<div class="small">Add branches in the Report tab first.</div>';
+}
+function saveRevenue() {
+  var ym = dashYM(), rev = {};
+  document.querySelectorAll(".rev-in").forEach(function(el){ if (el.value.trim()) rev[el.getAttribute("data-b")] = el.value.replace(/,/g,""); });
+  api("POST","/api/pnl/month",{year:ym.y,month:ym.m,revenue:rev}).then(function(d){ if (d.ok) { toast("💰 Sales saved"); loadDash(); } else toast("❌ "+(d.error||"error")); });
+}
+function renderHq() {
+  var al = DASH.pnl.alloc;
+  document.getElementById("hqBranchBoxes").innerHTML = '<div class="small"><b>Shared-cost (HQ) branches</b> — their costs are split to the others:</div>'+
+    PNLSET.branches.map(function(b){ return '<label style="display:inline-flex;gap:6px;align-items:center;margin:4px 10px 0 0;font-size:13px"><input type="checkbox" style="width:auto" '+(PNLSET.hqBranches.indexOf(b)!==-1?'checked':'')+' onchange="toggleHq(\''+esc(b)+'\',this.checked)">'+esc(b)+'</label>'; }).join("");
+  document.getElementById("allocMode").value = al.mode;
+  var hc = DASH.pnl.hqCost;
+  document.getElementById("hqNote").innerHTML = "HQ cost this month: <b>"+fmtB(hc.variable+hc.fixed+hc.unset)+"</b>"+(al.saved?" · 🔒 setting saved for this month":" · not saved yet (uses "+(al.mode==="custom"?"custom":al.mode)+")");
+  renderAllocPct();
+}
+function renderAllocPct() {
+  var mode = document.getElementById("allocMode").value, al = DASH.pnl.alloc;
+  document.getElementById("allocPct").innerHTML = opBranches().map(function(b){
+    var v = (al.pct[b]||0).toFixed(1);
+    return '<div class="field"><label>'+esc(b)+' %</label><input class="alloc-in" data-b="'+esc(b)+'" value="'+v+'" '+(mode==="custom"?'':'disabled')+'></div>';
+  }).join("");
+}
+function saveAlloc() {
+  var ym = dashYM(), mode = document.getElementById("allocMode").value, p = {};
+  document.querySelectorAll(".alloc-in").forEach(function(el){ p[el.getAttribute("data-b")] = parseFloat(el.value)||0; });
+  api("POST","/api/pnl/month",{year:ym.y,month:ym.m,alloc:{mode:mode,pct:p}}).then(function(d){ if (d.ok) { toast("🔒 Saved for this month"); loadDash(); } else toast("❌ "+(d.error||"error")); });
+}
+function toggleHq(b, on) {
+  var hq = PNLSET.hqBranches.filter(function(x){ return x!==b; });
+  if (on) hq.push(b);
+  api("POST","/api/pnl/settings",{hqBranches:hq}).then(function(){ toast("🏢 Saved"); loadDash(); });
+}
+function renderCostTypes() {
+  var opts = [["fixed","Fixed"],["variable","Variable"],["capex","Investment"],["unset","Not classified"]];
+  document.getElementById("costTypeRows").innerHTML = Object.keys(PNLSET.costTypes).map(function(c){
+    return '<div class="ct-row"><span>'+esc(c)+'</span><select onchange="setCostType(\''+esc(c).replace(/'/g,"\\'")+'\',this.value)">'+
+      opts.map(function(o){ return '<option value="'+o[0]+'"'+(PNLSET.costTypes[c]===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join("")+'</select></div>';
+  }).join("");
+}
+function setCostType(c, v) {
+  var ct = {}; ct[c] = v;
+  api("POST","/api/pnl/settings",{costTypes:ct}).then(function(){ toast("🏷 "+c.split("/")[0]+" → "+v); loadDash(); });
 }
 
 // ── Report ──
