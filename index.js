@@ -463,13 +463,13 @@ function styleHdr(row, color) {
 function normalizeBank(b) {
   var s = (b || "Unknown").trim();
   var l = s.toLowerCase();
-  if (/kasikorn|kbank|kbiz/.test(l)) return "KBank";
+  if (/kasikorn|kbank|kbiz|กสิกร/.test(l)) return "KBank";
   if (/government\s*savings|gsb|ออมสิน/.test(l)) return "GSB";
-  if (/ayudhya|krungsri|(^|[^a-z])bay([^a-z]|$)/.test(l)) return "Krungsri";
-  if (/krung\s*thai|ktb/.test(l)) return "Krungthai";
-  if (/bangkok\s*bank|bbl/.test(l)) return "Bangkok Bank";
-  if (/siam\s*commercial|scb/.test(l)) return "SCB";
-  if (/tmb|ttb|thanachart/.test(l)) return "TTB";
+  if (/ayudhya|krungsri|(^|[^a-z])bay([^a-z]|$)|กรุงศรี/.test(l)) return "Krungsri";
+  if (/krung\s*thai|ktb|กรุงไทย/.test(l)) return "Krungthai";
+  if (/bangkok\s*bank|bbl|กรุงเทพ/.test(l)) return "Bangkok Bank";
+  if (/siam\s*commercial|scb|ไทยพาณิชย์/.test(l)) return "SCB";
+  if (/tmb|ttb|thanachart|ทหารไทย|ธนชาต/.test(l)) return "TTB";
   if (/baac|เพื่อการเกษตร/.test(l)) return "BAAC";
   if (/prompt\s*pay|พร้อมเพย์/.test(l)) return "PromptPay";
   if (/uob/.test(l)) return "UOB";
@@ -510,11 +510,15 @@ function last4(acct) {
   var d = String(acct || "").replace(/\D/g, "");
   return d.length >= 3 ? d.slice(-4) : null;
 }
+// Banks show different slices of one number (168-3-58464-5 → "8464" on slips, "X4645" / "X584645" on statements);
+// with the full number saved, any 4+ digit slice of it matches
 function findAccount(reg, bank, acct) {
   var l = last4(acct);
   if (!l) return null;
   var nb = normalizeBank(bank);
-  return reg.accounts.find(function(a) { return a.bank === nb && (a.last4 === l || (a.alt || []).indexOf(l) !== -1); }) || null;
+  var digits = String(acct || "").replace(/\D/g, "");
+  return reg.accounts.find(function(a) { return a.bank === nb && (a.last4 === l || (a.alt || []).indexOf(l) !== -1); }) ||
+    (digits.length >= 4 ? reg.accounts.find(function(a) { return a.bank === nb && a.full && a.full.indexOf(digits) !== -1; }) : null) || null;
 }
 // Paying (from) accounts are discovered automatically from slips
 function registerFromAccount(reg, p) {
@@ -674,6 +678,662 @@ async function flagInternalCandidates(ids, force) {
   return { checked: targets.length, flagged: flagged };
 }
 
+// ── Bank statements: import, balance check, match with slips ──────────────
+// The statement is the bank's own record; slips and bills are the evidence attached to it.
+// statements.json = { files: {key: info}, lines: [line], drive: {fileId: modifiedTime} }
+const STMT_FILE = path.join(DATA_DIR, "statements.json");
+const STMT_DIR = path.join(DATA_DIR, "statements"); // original files, kept for audit
+const PAYROLL_DIR = path.join(DATA_DIR, "payroll");
+function loadStatements() {
+  var d = loadJsonFile(STMT_FILE, null) || {};
+  if (!d.files) d.files = {};
+  if (!Array.isArray(d.lines)) d.lines = [];
+  if (!d.drive) d.drive = {};
+  return d;
+}
+function saveStatements(d) { fs.writeFileSync(STMT_FILE, JSON.stringify(d)); }
+function round2(n) { return Math.round(n * 100) / 100; }
+function sha(s) { return crypto.createHash("sha1").update(s).digest("hex"); }
+
+// RFC-4180 CSV (quoted fields may contain commas and new lines)
+function parseCsv(text) {
+  var rows = [], row = [], cell = "", q = false;
+  for (var i = 0; i < text.length; i++) {
+    var ch = text[i];
+    if (q) {
+      if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+      else cell += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === ",") { row.push(cell); cell = ""; }
+    else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && text[i + 1] === "\n") i++;
+      row.push(cell); rows.push(row); row = []; cell = "";
+    } else cell += ch;
+  }
+  if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+// UTF-8, or Thai Windows-874 when the bytes are not valid UTF-8
+function decodeText(buf) {
+  var t = buf.toString("utf8");
+  if (t.indexOf("�") !== -1) { try { t = new TextDecoder("windows-874").decode(buf); } catch (e) {} }
+  return t.replace(/^﻿/, "");
+}
+function toNum(v) {
+  var s = String(v == null ? "" : v).replace(/[,\s"]/g, "");
+  if (!s) return null;
+  var neg = /^\(.*\)$/.test(s);
+  var n = Number(s.replace(/[()]/g, ""));
+  return isNaN(n) ? null : (neg ? -n : n);
+}
+function dmyToIso(d) { var m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(d || "").trim()); return m ? m[3] + "-" + m[2] + "-" + m[1] : null; }
+
+function detectFileKind(text) {
+  var first = text.split(/\r?\n/)[0] || "";
+  if (/K-DEPOSIT STATEMENT/i.test(text.slice(0, 600))) return "kbank_csv";
+  if (/^Account Number,Account Name,Account Type/i.test(first)) return "scb_csv";
+  if (/(^|,)Branch(,|$)/i.test(first) && /NET PAY/i.test(first)) return "payroll_csv";
+  return null;
+}
+
+// "โอนไป SCB X6710 บริษัท …", "รับโอนจาก KBANK x4645 …", "PromptPay to x2484 MR …", "เพื่อชำระ Ref X5042 บจก. บัตรกรุงศรีอยุธยา"
+function parseCounterparty(desc, ownBank) {
+  var d = String(desc || "").replace(/\+\+\s*$/, "").trim();
+  var bill = /เพื่อชำระ\s+(?:([A-Z]{2,6})\s+)?Ref\s+\S+\s+(.*)$/i.exec(d);
+  if (bill) return { bank: null, digits: null, name: bill[2].trim(), bill: true };
+  var m = /(?:^|\s)(?:([A-Z]{2,6})\s+)?[xX](\d{3,})\s*(.*)$/.exec(d);
+  if (!m) return { bank: null, digits: null, name: d };
+  var bank = m[1] && !/^(TO|REF)$/i.test(m[1]) ? normalizeBank(m[1]) : null;
+  if (/พร้อมเพย์|promptpay/i.test(d)) bank = "PromptPay";
+  return { bank: bank || ownBank, digits: m[2], name: (m[3] || "").replace(/\+\+$/, "").trim() };
+}
+
+function parseKBankCsv(text) {
+  var rows = parseCsv(text), acct = null, period = null, opening = null, lines = [];
+  rows.forEach(function(r) {
+    var c = r.map(function(x) { return String(x || "").trim(); });
+    var i = c.indexOf("เลขที่บัญชีเงินฝาก");
+    if (i !== -1) acct = c.slice(i + 1).find(function(x) { return /\d{3}-\d/.test(x); }) || acct;
+    i = c.indexOf("รอบระหว่างวันที่");
+    if (i !== -1) period = c.slice(i + 1).find(function(x) { return /\d{2}\/\d{2}\/\d{4}/.test(x); }) || period;
+    var dm = /^(\d{2})-(\d{2})-(\d{2})$/.exec(c[1] || "");
+    if (!dm) return;
+    if (c[3] === "ยอดยกมา") { opening = toNum(c[8]); return; }
+    lines.push({ date: "20" + dm[3] + "-" + dm[2] + "-" + dm[1], time: c[2] || "", type: c[3], out: toNum(c[4]), in: toNum(c[6]), balance: toNum(c[8]), channel: c[10] || "", desc: c[12] || "" });
+  });
+  var pm = /(\d{2}\/\d{2}\/\d{4})\s*-\s*(\d{2}\/\d{2}\/\d{4})/.exec(period || "");
+  return { bank: "KBank", full: String(acct || "").replace(/\D/g, ""), period: pm ? { from: dmyToIso(pm[1]), to: dmyToIso(pm[2]) } : null, opening: opening, lines: lines };
+}
+
+function parseScbCsv(text) {
+  var rows = parseCsv(text), lines = [], full = null;
+  rows.slice(1).forEach(function(r) {
+    if (r.length < 14 || !dmyToIso(r[5])) return;
+    full = full || String(r[0]).replace(/\D/g, "");
+    lines.push({ date: dmyToIso(r[5]), time: String(r[6] || "").trim(), type: String(r[8] || "").trim(), out: toNum(r[11]), in: toNum(r[12]), balance: toNum(r[13]), channel: String(r[9] || "").trim(), desc: String(r[14] || "").trim() });
+  });
+  if (!lines.length) return { bank: "SCB", full: full, period: null, opening: null, lines: [] };
+  var f = lines[0];
+  var opening = round2(f.balance + (f.out || 0) - (f.in || 0)); // export has no opening row
+  return { bank: "SCB", full: full, period: { from: lines[0].date, to: lines[lines.length - 1].date }, opening: opening, lines: lines };
+}
+
+// every running balance must follow from the previous one — catches a bad file before it is trusted
+function checkBalances(opening, lines) {
+  if (opening === null || opening === undefined) return { ok: false, error: "no opening balance found" };
+  var bal = opening;
+  for (var i = 0; i < lines.length; i++) {
+    bal = round2(bal - (lines[i].out || 0) + (lines[i].in || 0));
+    if (lines[i].balance !== null && Math.abs(bal - lines[i].balance) > 0.005) {
+      return { ok: false, error: "balance does not add up at line " + (i + 1) + " (" + lines[i].date + " " + lines[i].time + "): expected " + bal.toFixed(2) + ", file says " + lines[i].balance.toFixed(2) };
+    }
+  }
+  return { ok: true, closing: bal };
+}
+
+// find (or add) the registry entry for a statement's account; remembers the full number
+function accountForStatement(reg, bank, full) {
+  var a = reg.accounts.find(function(x) { return x.bank === bank && x.full === full; }) ||
+    reg.accounts.find(function(x) { return x.bank === bank && !x.full && [x.last4].concat(x.alt || []).some(function(l) { return l && full.indexOf(l) !== -1; }); });
+  if (a) { a.full = full; return a; }
+  a = { bank: bank, last4: full.slice(-4), alt: [], full: full, branch: null, type: "company", label: "", firstSeenSlip: null, firstSeenAt: new Date().toISOString() };
+  reg.accounts.push(a);
+  return a;
+}
+function acctLabelOf(a) { return a ? a.bank + " ****" + a.last4 + (a.label ? " " + a.label : "") + (a.branch ? " · " + a.branch : "") : "?"; }
+
+function importStatement(text, info) {
+  var kind = detectFileKind(text);
+  if (kind === "payroll_csv") return importPayroll(text, info);
+  if (!kind) return { ok: false, skipped: true, error: "not a bank statement this app can read (KBank CSV, SCB CSV, payroll CSV)" };
+  var P = kind === "kbank_csv" ? parseKBankCsv(text) : parseScbCsv(text);
+  if (!P.full || P.full.length < 8) return { ok: false, error: "account number not found in file" };
+  if (!P.lines.length) return { ok: false, error: "no transactions in file" };
+  var bc = checkBalances(P.opening, P.lines);
+  if (!bc.ok) return { ok: false, error: bc.error };
+  var reg = loadAccounts();
+  var acct = accountForStatement(reg, P.bank, P.full);
+  saveAccounts(reg);
+  var st = loadStatements();
+  var key = sha(P.bank + P.full + P.period.from + P.period.to).slice(0, 16);
+  // keep your earlier decisions on lines that come back in a re-import
+  var old = {};
+  st.lines.forEach(function(l) { old[l.id] = l; });
+  st.lines = st.lines.filter(function(l) { return l.file !== key; });
+  var have = {};
+  st.lines.forEach(function(l) { have[l.id] = true; });
+  var added = 0;
+  P.lines.forEach(function(l) {
+    var id = sha([P.full, l.date, l.time, l.out, l.in, l.balance].join("|")).slice(0, 12);
+    if (have[id]) return; // same line already imported from an overlapping export
+    var cp = parseCounterparty(l.desc, P.bank);
+    var rec = Object.assign({ id: id, file: key, bank: P.bank, account: P.full, counterparty: cp }, l);
+    if (old[id]) ["slipId", "resolved"].forEach(function(f) { if (old[id][f] !== undefined) rec[f] = old[id][f]; });
+    st.lines.push(rec);
+    have[id] = true;
+    added++;
+  });
+  st.lines.sort(function(a, b) { return (a.date + a.time).localeCompare(b.date + b.time); });
+  st.files[key] = { key: key, name: info.name || "", source: info.source || "upload", driveId: info.driveId || null, bank: P.bank, account: P.full,
+    period: P.period, opening: P.opening, closing: bc.closing, count: P.lines.length, importedAt: new Date().toISOString() };
+  saveStatements(st);
+  try {
+    if (!fs.existsSync(STMT_DIR)) fs.mkdirSync(STMT_DIR, { recursive: true });
+    fs.writeFileSync(path.join(STMT_DIR, key + ".csv"), text);
+  } catch (e) { console.error("statement copy:", e.message); }
+  return { ok: true, kind: kind, account: acctLabelOf(acct), period: P.period, lines: P.lines.length, added: added, closing: bc.closing };
+}
+
+// ── Matching statement lines ↔ slips ──
+function lineAccount(reg, l) { return reg.accounts.find(function(a) { return a.bank === l.bank && a.full === l.account; }) || null; }
+function counterpartyAccount(reg, l) {
+  var cp = l.counterparty || {};
+  if (!cp.digits) return null;
+  var a = findAccount(reg, cp.bank || l.bank, cp.digits);
+  return a && a.type !== "external" && a.type !== "personal" ? a : null;
+}
+function daysApart(a, b) { return Math.abs(Date.parse(a) - Date.parse(b)) / 86400000; }
+function minutesOf(t) { var m = /^(\d{1,2}):(\d{2})/.exec(t || ""); return m ? +m[1] * 60 + +m[2] : null; }
+
+// one-to-one: each money-out line gets at most one slip of the same account, amount and ±2 days
+function matchLines(lines, slips, reg) {
+  var used = {}, byLine = {};
+  lines.forEach(function(l) {
+    var sid = l.slipId || (l.resolved && l.resolved.slipId);
+    if (sid) { byLine[l.id] = sid; used[sid] = true; }
+  });
+  var pairs = [];
+  lines.forEach(function(l) {
+    if (byLine[l.id] || l.resolved || !(l.out > 0)) return;
+    var la = lineAccount(reg, l);
+    slips.forEach(function(p) {
+      if (used[p.id] || !p.transaction_date) return;
+      if (Math.abs((Number(p.amount) || 0) - l.out) >= 0.01) return;
+      if (findAccount(reg, p.bank_from, p.account_from) !== la) return;
+      var dd = daysApart(p.transaction_date, l.date);
+      if (dd > 2) return;
+      var tm = minutesOf(p.transaction_time), lm = minutesOf(l.time);
+      pairs.push({ line: l.id, slip: p.id, score: dd * 1440 + (tm !== null && lm !== null ? Math.abs(tm - lm) : 720) });
+    });
+  });
+  pairs.sort(function(a, b) { return a.score - b.score; });
+  pairs.forEach(function(x) { if (!byLine[x.line] && !used[x.slip]) { byLine[x.line] = x.slip; used[x.slip] = true; } });
+  return { byLine: byLine, used: used };
+}
+
+function statementCoverage(st, full, ym) {
+  var first = ym + "-01", last = ym + "-" + String(new Date(+ym.slice(0, 4), +ym.slice(5), 0).getDate()).padStart(2, "0");
+  var files = Object.values(st.files).filter(function(f) { return f.account === full && f.period && f.period.from <= last && f.period.to >= first; });
+  if (!files.length) return "none";
+  var from = files.map(function(f) { return f.period.from; }).sort()[0], to = files.map(function(f) { return f.period.to; }).sort().pop();
+  return from <= first && to >= last ? "full" : "partial";
+}
+function lineCovered(st, full, date) {
+  return Object.values(st.files).some(function(f) { return f.account === full && f.period && f.period.from <= date && f.period.to >= date; });
+}
+
+function reconMonth(y, m) {
+  var ym = ymKey(y, m);
+  var st = loadStatements(), reg = loadAccounts(), all = loadPayments();
+  var near = function(d) { return d && d.slice(0, 7) >= ymKey(prevMonthOf(y, m).y, prevMonthOf(y, m).m) && d.slice(0, 7) <= ymKey(m === 12 ? y + 1 : y, m === 12 ? 1 : m + 1); };
+  var lines = st.lines.filter(function(l) { return near(l.date); });
+  var slips = all.filter(function(p) { return near(p.transaction_date); });
+  var mt = matchLines(lines, slips, reg);
+  var byId = {};
+  all.forEach(function(p) { byId[p.id] = p; });
+  var out = { ym: ym, accounts: [], noSlip: [], notInStatement: [], missingStatements: [], counts: { matched: 0, internal: 0, noSlip: 0, resolved: 0 } };
+  var monthLines = lines.filter(function(l) { return l.date.slice(0, 7) === ym; });
+  monthLines.forEach(function(l) {
+    var sid = mt.byLine[l.id];
+    if (l.out > 0) {
+      if (l.resolved && l.resolved.how === "ignored") { l.status = "ignored"; out.counts.resolved++; }
+      else if (sid) { l.status = "matched"; l.slip = byId[sid] ? { id: sid, display_id: showId(byId[sid]) } : { id: sid }; out.counts.matched++; }
+      else if (counterpartyAccount(reg, l)) { l.status = "internal"; out.counts.internal++; }
+      else {
+        l.status = "noSlip"; out.counts.noSlip++;
+        // likely slips: same amount ±10 days, any account (helps when the slip's account was misread)
+        l.candidates = all.filter(function(p) { return !mt.used[p.id] && p.transaction_date && Math.abs((Number(p.amount) || 0) - l.out) < 0.01 && daysApart(p.transaction_date, l.date) <= 10; })
+          .slice(0, 5).map(function(p) { return { id: p.id, display_id: showId(p), date: p.transaction_date, from: (p.bank_from || "") + " ****" + (p.account_from || ""), recipient: p.recipient_name || "" }; });
+        out.noSlip.push(l);
+      }
+    } else l.status = "in";
+  });
+  // slips whose account has a statement for that day but no line matched them
+  all.forEach(function(p) {
+    if (!p.transaction_date || p.transaction_date.slice(0, 7) !== ym || mt.used[p.id] || p.stmt_ok) return;
+    var a = findAccount(reg, p.bank_from, p.account_from);
+    if (!a || !a.full || !lineCovered(st, a.full, p.transaction_date)) return;
+    out.notInStatement.push(p.id);
+  });
+  // accounts that use statements must have one for this month
+  var withFiles = {};
+  Object.values(st.files).forEach(function(f) { if (!withFiles[f.account] || f.period.from < withFiles[f.account]) withFiles[f.account] = f.period.from; });
+  reg.accounts.forEach(function(a) {
+    if (!a.full || !withFiles[a.full]) return;
+    var cov = statementCoverage(st, a.full, ym);
+    var ls = monthLines.filter(function(l) { return l.account === a.full && l.bank === a.bank; });
+    var sum = function(f) { return round2(ls.reduce(function(s, l) { return s + (f(l) || 0); }, 0)); };
+    var info = { label: acctLabelOf(a), bank: a.bank, full: a.full, branch: a.branch, coverage: cov, lines: ls.length,
+      moneyOut: sum(function(l) { return l.out; }), moneyIn: sum(function(l) { return l.in; }),
+      sales: sum(function(l) { return l.in && /ขาย|sale/i.test(l.type) ? l.in : 0; }),
+      matched: ls.filter(function(l) { return l.status === "matched"; }).length,
+      internal: ls.filter(function(l) { return l.status === "internal"; }).length,
+      noSlip: ls.filter(function(l) { return l.status === "noSlip"; }).length };
+    out.accounts.push(info);
+    if (cov !== "full" && withFiles[a.full] <= ym + "-31") out.missingStatements.push(info.label + (cov === "partial" ? " (part of the month only)" : ""));
+  });
+  return out;
+}
+
+// ── Payroll file → split the payroll batch by branch ──
+var MONTHS_EN = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+function payrollMonthFromName(name) {
+  var m = new RegExp("(" + MONTHS_EN.join("|") + ")[^0-9]{0,3}(\\d{4})", "i").exec(name || "");
+  return m ? ymKey(+m[2], MONTHS_EN.indexOf(m[1].toLowerCase()) + 1) : null;
+}
+function importPayroll(text, info) {
+  var ym = payrollMonthFromName(info.name) || info.month;
+  if (!ym) return { ok: false, error: "payroll month unknown — name the file like RCG_Payroll_October_2026.csv" };
+  var rows = parseCsv(text);
+  var h = rows[0].map(function(x) { return String(x).trim().toLowerCase(); });
+  var ix = { name: h.indexOf("name"), nick: h.indexOf("nickname"), branch: h.indexOf("branch"), net: h.indexOf("net pay") };
+  if (ix.branch === -1 || ix.net === -1) return { ok: false, error: "payroll file needs Branch and NET PAY columns" };
+  var people = rows.slice(1).filter(function(r) { return r.length > ix.net; }).map(function(r) {
+    return { name: String(r[ix.name] || "").trim(), nick: ix.nick !== -1 ? String(r[ix.nick] || "").trim() : "", branchRaw: String(r[ix.branch] || "").trim(), net: toNum(r[ix.net]) || 0 };
+  }).filter(function(p) { return p.net > 0; });
+  if (!fs.existsSync(PAYROLL_DIR)) fs.mkdirSync(PAYROLL_DIR, { recursive: true });
+  fs.writeFileSync(path.join(PAYROLL_DIR, ym + ".json"), JSON.stringify({ ym: ym, file: info.name || "", importedAt: new Date().toISOString(), people: people }, null, 2));
+  return { ok: true, kind: "payroll_csv", month: ym, people: people.length, total: round2(people.reduce(function(s, p) { return s + p.net; }, 0)) };
+}
+function payrollBranch(raw, reg, pnl) {
+  var map = pnl.payrollBranchMap || {};
+  if (map[raw] && reg.branches.indexOf(map[raw]) !== -1) return map[raw];
+  var hit = reg.branches.find(function(b) { return raw.toLowerCase().indexOf(b.toLowerCase()) !== -1; });
+  if (hit) return hit;
+  if (/สำนักงานใหญ่|head ?office|\bhq\b/i.test(raw) && pnl.hqBranches.length) return pnl.hqBranches[0];
+  return null;
+}
+function isSalary(p) { return /salary|เงินเดือน|payroll/i.test((p.category || "") + " " + (p.purpose || "")); }
+// individual transfers = exact NET PAY of one person; the biggest remaining salary payment = the batch
+function payrollPlan(y, m) {
+  var ym = ymKey(y, m);
+  var f = path.join(PAYROLL_DIR, ym + ".json");
+  if (!fs.existsSync(f)) return { ym: ym, imported: false };
+  var pr = JSON.parse(fs.readFileSync(f, "utf8"));
+  var reg = loadAccounts(), pnl = loadPnl();
+  var people = pr.people.map(function(p) { return Object.assign({}, p, { branch: payrollBranch(p.branchRaw, reg, pnl) }); });
+  var unmapped = {};
+  people.forEach(function(p) { if (!p.branch) unmapped[p.branchRaw] = true; });
+  var pays = loadPayments().filter(function(p) { return costYm(p) === ym && classify(p, reg).kind === "expense" && isSalary(p); });
+  var left = people.slice(), individual = [];
+  pays.slice().sort(function(a, b) { return a.amount - b.amount; }).forEach(function(p) {
+    var hits = left.filter(function(x) { return Math.abs(x.net - (Number(p.amount) || 0)) < 0.01; });
+    if (hits.length === 1) { individual.push({ slipId: p.id, display_id: showId(p), amount: Number(p.amount), person: hits[0].nick || hits[0].name, branch: hits[0].branch }); left.splice(left.indexOf(hits[0]), 1); }
+  });
+  var rest = pays.filter(function(p) { return !individual.some(function(i) { return i.slipId === p.id; }); }).sort(function(a, b) { return b.amount - a.amount; });
+  var batch = null;
+  if (rest.length) {
+    var b = rest[0], netLeft = left.reduce(function(s, p) { return s + p.net; }, 0);
+    var byB = {};
+    left.forEach(function(p) { var k = p.branch || "?"; byB[k] = (byB[k] || 0) + p.net; });
+    var scale = netLeft > 0 ? Number(b.amount) / netLeft : 0;
+    batch = { slipId: b.id, display_id: showId(b), amount: Number(b.amount), netLeft: round2(netLeft), diff: round2(Number(b.amount) - netLeft),
+      alloc: Object.keys(byB).map(function(k) { return { branch: k, net: round2(byB[k]), amount: round2(byB[k] * scale) }; }) };
+  }
+  var byBranch = {};
+  people.forEach(function(p) { var k = p.branch || "?"; byBranch[k] = round2((byBranch[k] || 0) + p.net); });
+  return { ym: ym, imported: true, file: pr.file, importedAt: pr.importedAt, people: people.length, total: round2(people.reduce(function(s, p) { return s + p.net; }, 0)),
+    byBranch: byBranch, unmapped: Object.keys(unmapped), individual: individual, batch: batch, applied: pays.some(function(p) { return p.payroll_ym === ym; }), branches: reg.branches };
+}
+function applyPayroll(y, m) {
+  var plan = payrollPlan(y, m);
+  if (!plan.imported) return { ok: false, error: "no payroll file for this month" };
+  if (plan.unmapped.length) return { ok: false, error: "match these payroll branches first: " + plan.unmapped.join(", ") };
+  var reg = loadAccounts(), list = loadPayments();
+  var setSplit = function(id, alloc) {
+    var p = list.find(function(x) { return x.id === id; });
+    if (!p) return;
+    var home = classify(p, reg).fromBranch || NO_BRANCH;
+    var split = alloc.filter(function(a) { return a.branch !== home && a.amount > 0.009; }).map(function(a) { return { branch: a.branch, amount: a.amount }; });
+    if (split.length) p.split = split; else delete p.split;
+    p.payroll_ym = plan.ym;
+  };
+  plan.individual.forEach(function(i) { setSplit(i.slipId, [{ branch: i.branch, amount: i.amount }]); });
+  if (plan.batch) {
+    setSplit(plan.batch.slipId, plan.batch.alloc);
+    // links from internal transfers moved shares of this slip before — the payroll file replaces them
+    list.forEach(function(t) { if (String(t.linked_to) === String(plan.batch.slipId)) { t.linked_to_replaced = t.linked_to; delete t.linked_to; } });
+  }
+  savePayments(list);
+  return { ok: true, plan: payrollPlan(y, m) };
+}
+
+// ── Google Drive (service account, read-only, only folders shared with it) ──
+function driveCreds() { try { return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || ""); } catch (e) { return null; } }
+var DRIVE_API = process.env.DRIVE_API_URL || "https://www.googleapis.com/drive/v3";
+var driveTok = null;
+function b64url(x) { return Buffer.from(x).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_"); }
+async function driveToken() {
+  if (driveTok && driveTok.exp > Date.now() + 60000) return driveTok.token;
+  var c = driveCreds();
+  if (!c || !c.client_email || !c.private_key) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not set on the server");
+  var now = Math.floor(Date.now() / 1000), aud = c.token_uri || "https://oauth2.googleapis.com/token";
+  var unsigned = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" })) + "." + b64url(JSON.stringify({ iss: c.client_email, scope: "https://www.googleapis.com/auth/drive.readonly", aud: aud, iat: now, exp: now + 3600 }));
+  var sig = crypto.createSign("RSA-SHA256").update(unsigned).sign(c.private_key, "base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+  var r = await axios.post(aud, "grant_type=" + encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer") + "&assertion=" + unsigned + "." + sig, { headers: { "content-type": "application/x-www-form-urlencoded" } });
+  driveTok = { token: r.data.access_token, exp: Date.now() + (r.data.expires_in || 3600) * 1000 };
+  return driveTok.token;
+}
+async function driveListAll(folderId) {
+  var tok = await driveToken(), files = [], queue = [{ id: folderId, path: "" }], guard = 0;
+  while (queue.length && guard++ < 200) {
+    var f = queue.shift(), pageToken = null;
+    do {
+      var r = await axios.get(DRIVE_API + "/files", { headers: { Authorization: "Bearer " + tok }, params: {
+        q: "'" + f.id + "' in parents and trashed=false", fields: "nextPageToken,files(id,name,mimeType,modifiedTime,size)",
+        pageSize: 200, pageToken: pageToken || undefined, supportsAllDrives: true, includeItemsFromAllDrives: true } });
+      (r.data.files || []).forEach(function(x) {
+        if (x.mimeType === "application/vnd.google-apps.folder") queue.push({ id: x.id, path: f.path + x.name + "/" });
+        else files.push(Object.assign({ path: f.path + x.name }, x));
+      });
+      pageToken = r.data.nextPageToken;
+    } while (pageToken);
+  }
+  return files;
+}
+async function driveDownload(id) {
+  var r = await axios.get(DRIVE_API + "/files/" + id, { headers: { Authorization: "Bearer " + await driveToken() }, params: { alt: "media", supportsAllDrives: true }, responseType: "arraybuffer" });
+  return Buffer.from(r.data);
+}
+function driveFolderId(link) { var m = /folders\/([\w-]{10,})/.exec(link || "") || /^([\w-]{10,})$/.exec(String(link || "").trim()); return m ? m[1] : null; }
+var driveSyncing = false;
+async function driveSync() {
+  if (driveSyncing) return { ok: false, error: "sync already running" };
+  var folders = driveFolders(loadSettings());
+  if (!folders.length) return { ok: false, error: "no Drive folder set" };
+  driveSyncing = true;
+  var results = [];
+  try {
+    var files = [];
+    for (var fi = 0; fi < folders.length; fi++) files = files.concat(await driveListAll(folders[fi]));
+    var st = loadStatements();
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      if (st.drive[f.id] === f.modifiedTime) continue; // unchanged since last sync
+      var isCsv = /\.csv$/i.test(f.name) || f.mimeType === "text/csv";
+      var isXlsx = /\.xlsx$/i.test(f.name) || f.mimeType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      var r;
+      if ((isCsv || isXlsx) && Number(f.size || 0) < 15e6) {
+        try { r = await importAny(await driveDownload(f.id), { name: f.name, source: "drive", driveId: f.id, month: monthFromPath(f.path) }); }
+        catch (e) { r = { ok: false, error: e.message }; }
+      } else if (/\.pdf$/i.test(f.name) || f.mimeType === "application/pdf") r = { ok: false, skipped: true, error: "PDF statements: coming in the next update" };
+      else r = { ok: false, skipped: true, error: "not a statement file" };
+      results.push(Object.assign({ file: f.path }, r));
+      st = loadStatements();
+      if (r.ok || r.skipped) { st.drive[f.id] = f.modifiedTime; saveStatements(st); }
+    }
+    var s2 = loadSettings();
+    s2.driveLastSync = new Date().toISOString();
+    s2.driveLastResults = results.filter(function(x) { return !x.skipped; }).slice(-30);
+    saveSettings(s2);
+    return { ok: true, checked: files.length, results: results };
+  } catch (e) {
+    var msg = e.response && e.response.data ? JSON.stringify(e.response.data).slice(0, 300) : e.message;
+    console.error("Drive sync:", msg);
+    return { ok: false, error: msg };
+  } finally { driveSyncing = false; }
+}
+// folder names like "1026" (MM + YY) say which month the files inside belong to
+function monthFromPath(p) {
+  var parts = String(p || "").split("/").slice(0, -1).reverse();
+  for (var i = 0; i < parts.length; i++) { var m = /^(0[1-9]|1[0-2])(\d{2})$/.exec(parts[i].trim()); if (m) return "20" + m[2] + "-" + m[1]; }
+  return null;
+}
+function driveFolders(s) { return (s.driveFolders || []).concat(s.driveFolderId && (s.driveFolders || []).indexOf(s.driveFolderId) === -1 ? [s.driveFolderId] : []); }
+function driveAutoSync() {
+  var s = loadSettings();
+  if (!driveCreds() || !driveFolders(s).length) return;
+  if (s.driveLastSync && Date.now() - Date.parse(s.driveLastSync) < 6 * 3600 * 1000) return;
+  driveSync().catch(function() {});
+}
+
+// ── POS sales report (xlsx) and petty-cash report (xlsx) ───────────────────
+// Only totals are kept (branch × month / day × channel) — no customer names.
+const SALES_DIR = path.join(DATA_DIR, "sales");
+const PETTY_FILE = path.join(DATA_DIR, "petty.json");
+function xv(v) {
+  if (v === null || v === undefined) return null;
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === "object") { if (v.result !== undefined) return v.result; if (v.richText) return v.richText.map(function(x) { return x.text; }).join(""); if (v.text !== undefined) return v.text; }
+  return v;
+}
+function xnum(v) { v = xv(v); return typeof v === "number" ? v : (toNum(v) || 0); }
+function rowVals(ws, i) { return ws.getRow(i).values.slice(1).map(xv); }
+function headerIndex(vals) { var ix = {}; vals.forEach(function(h, c) { if (h !== null && h !== undefined) ix[String(h).trim()] = c; }); return ix; }
+// "01/10/2026 10:26" or a real date → "2026-10-01"
+function anyDateIso(v) {
+  v = xv(v);
+  if (!v) return null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(v)) return String(v).slice(0, 10);
+  var m = /^(\d{2})\/(\d{2})\/(\d{4})/.exec(String(v).trim());
+  return m ? m[3] + "-" + m[2] + "-" + m[1] : null;
+}
+// POS / petty-cash branch names → our branches (same name, contained, or chosen once by the owner)
+function mapPosBranch(raw, reg, pnl) {
+  raw = String(raw || "").trim();
+  var map = pnl.posBranchMap || {};
+  if (map[raw] && reg.branches.indexOf(map[raw]) !== -1) return map[raw];
+  var l = raw.toLowerCase();
+  return reg.branches.find(function(b) { return b.toLowerCase() === l; }) ||
+    reg.branches.find(function(b) { var x = b.toLowerCase(); return l.indexOf(x) !== -1 || x.indexOf(l) !== -1; }) || null;
+}
+
+function importSalesWb(wb, info) {
+  var ws = wb.getWorksheet("รายการขาย");
+  var hr = 0;
+  for (var i = 1; i <= Math.min(ws.rowCount, 6); i++) if (rowVals(ws, i).indexOf("วันที่เปิดบิล") !== -1) { hr = i; break; }
+  if (!hr) return { ok: false, error: "sales report: header row not found" };
+  var ix = headerIndex(rowVals(ws, hr));
+  var need = ["วันที่เปิดบิล", "สาขา", "ยอดรวม (฿)", "รับรู้รายได้ (฿)"];
+  var miss = need.filter(function(h) { return ix[h] === undefined; });
+  if (miss.length) return { ok: false, error: "sales report: missing columns " + miss.join(", ") };
+  var col = function(v, h) { return ix[h] === undefined ? 0 : xnum(v[ix[h]]); };
+  var months = {}, rows = 0;
+  for (var r = hr + 1; r <= ws.rowCount; r++) {
+    var v = rowVals(ws, r);
+    var br = v[ix["สาขา"]], d = anyDateIso(v[ix["วันที่เปิดบิล"]]);
+    if (!br || !d) continue; // summary rows at the bottom have no branch
+    if (ix["สถานะ"] !== undefined && /void|cancel|ยกเลิก/i.test(String(v[ix["สถานะ"]] || ""))) continue;
+    var ym = d.slice(0, 7);
+    if (!months[ym]) months[ym] = {};
+    var B = months[ym][br] || (months[ym][br] = { bills: 0, gross: 0, discBill: 0, discCard: 0, discPoints: 0, netSales: 0, sales: 0, recognized: 0,
+      cash: 0, transfer: 0, card: 0, wallet: 0, online: 0, voucher: 0, walletTopup: 0, deferredAdded: 0, deferredUsed: 0, byDay: {} });
+    var g = col(v, "ยอดรวม (฿)"), db = col(v, "ส่วนลดท้ายบิล (฿)"), dc = col(v, "ส่วนลดบัตร (฿)");
+    B.bills++; B.gross += g; B.discBill += db; B.discCard += dc; B.discPoints += col(v, "ส่วนลดใช้แต้ม (฿)");
+    B.netSales += col(v, "ยอดสุทธิ (฿)"); B.sales += g - db - dc; B.recognized += col(v, "รับรู้รายได้ (฿)");
+    var ch = { cash: col(v, "เงินสด (฿)"), transfer: col(v, "โอนเงิน (฿)"), card: col(v, "บัตรเครดิต (฿)") };
+    B.cash += ch.cash; B.transfer += ch.transfer; B.card += ch.card; B.wallet += col(v, "Wallet (฿)"); B.online += col(v, "ซื้อออนไลน์ (฿)"); B.voucher += col(v, "Voucher (฿)");
+    B.walletTopup += col(v, "เติม Wallet (฿)"); B.deferredAdded += col(v, "ตั้งหนี้สินเพิ่ม (฿)"); B.deferredUsed += col(v, "รับรู้จากหนี้สินเดิม (฿)");
+    var day = B.byDay[d] || (B.byDay[d] = { cash: 0, transfer: 0, card: 0 });
+    day.cash += ch.cash; day.transfer += ch.transfer; day.card += ch.card;
+    rows++;
+  }
+  if (!rows) return { ok: false, error: "sales report: no bills found" };
+  var pm = /(\d{4}-\d{2}-\d{2})_to_(\d{4}-\d{2}-\d{2})/.exec(info.name || "");
+  if (!fs.existsSync(SALES_DIR)) fs.mkdirSync(SALES_DIR, { recursive: true });
+  var saved = [];
+  Object.keys(months).forEach(function(ym) {
+    var last = ym + "-" + String(new Date(+ym.slice(0, 4), +ym.slice(5), 0).getDate()).padStart(2, "0");
+    var days = [].concat.apply([], Object.values(months[ym]).map(function(b) { return Object.keys(b.byDay); })).sort();
+    var full = pm ? (pm[1] <= ym + "-01" && pm[2] >= last) : (days[0] <= ym + "-03" && days[days.length - 1] >= ym + "-" + String(+last.slice(8) - 2).padStart(2, "0"));
+    Object.values(months[ym]).forEach(function(b) { Object.keys(b).forEach(function(k) { if (typeof b[k] === "number" && k !== "bills") b[k] = round2(b[k]); }); });
+    fs.writeFileSync(path.join(SALES_DIR, ym + ".json"), JSON.stringify({ ym: ym, file: info.name || "", importedAt: new Date().toISOString(), fullMonth: !!full, branches: months[ym] }, null, 2));
+    saved.push(ym + (full ? "" : " (part)"));
+  });
+  return { ok: true, kind: "sales_xlsx", months: saved, bills: rows,
+    summary: Object.keys(months).map(function(ym) { return ym + ": " + Object.keys(months[ym]).map(function(b) { return b + " " + baht(months[ym][b].recognized); }).join(", "); }).join(" · ") };
+}
+function loadSales(ym) { var f = path.join(SALES_DIR, ym + ".json"); return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : null; }
+// sales of one month keyed by our branch names
+function salesByBranch(ym, reg, pnl) {
+  var s = loadSales(ym), out = { data: {}, unmapped: [], file: s ? s.file : null, fullMonth: s ? s.fullMonth : false };
+  if (!s) return out;
+  Object.keys(s.branches).forEach(function(raw) {
+    var b = mapPosBranch(raw, reg, pnl);
+    if (!b) { out.unmapped.push(raw); return; }
+    out.data[b] = s.branches[raw];
+  });
+  return out;
+}
+
+function loadPetty() { var d = loadJsonFile(PETTY_FILE, null) || {}; if (!d.branches) d.branches = {}; return d; }
+function savePetty(d) { fs.writeFileSync(PETTY_FILE, JSON.stringify(d)); }
+function importPettyWb(wb, info) {
+  var ws = wb.getWorksheet("รายการ");
+  var head = {};
+  for (var i = 1; i <= 7; i++) { var v = rowVals(ws, i); if (v[0]) head[String(v[0]).trim()] = v[1]; }
+  var branch = String(head["สาขา"] || "").trim();
+  var pm = /(\d{2}\/\d{2}\/\d{4})\s*[–-]\s*(\d{2}\/\d{2}\/\d{4})/.exec(String(head["ช่วงวันที่"] || ""));
+  if (!branch || !pm) return { ok: false, error: "petty cash: branch or date range not found at the top of the sheet" };
+  var hr = 0;
+  for (i = 1; i <= 12; i++) if (rowVals(ws, i).indexOf("ID") !== -1) { hr = i; break; }
+  if (!hr) return { ok: false, error: "petty cash: header row not found" };
+  var ix = headerIndex(rowVals(ws, hr));
+  var entries = [], bal = xnum(head["ยอดยกมา"]);
+  for (var r = hr + 1; r <= ws.rowCount; r++) {
+    var v = rowVals(ws, r);
+    var id = v[ix["ID"]];
+    if (id === null || id === undefined || id === "") continue;
+    var e = { id: String(id), date: anyDateIso(v[ix["วันที่รายการ"]]) || anyDateIso(v[ix["วันที่บันทึก/อนุมัติ"]]), type: String(v[ix["ประเภท"]] || ""),
+      category: String(v[ix["รายการ"]] || "").trim(), detail: String(v[ix["รายละเอียด"]] || "").trim(),
+      in: xnum(v[ix["เข้า"]]), out: xnum(v[ix["ออก"]]), other: xnum(v[ix["รายรับอื่น (เข้าลิ้นชัก)"]]), status: String(v[ix["สถานะ"]] || "") };
+    var balance = v[ix["ยอดคงเหลือ"]];
+    if (e.status === "สำเร็จ") {
+      bal = round2(bal + e.in - e.out);
+      if (typeof balance === "number" && Math.abs(bal - balance) > 0.005) return { ok: false, error: "petty cash " + branch + ": balance does not add up at ID " + e.id + " (expected " + bal.toFixed(2) + ", file says " + balance.toFixed(2) + ")" };
+    }
+    entries.push(e);
+  }
+  var d = loadPetty();
+  var B = d.branches[branch] || (d.branches[branch] = { periods: [], entries: {} });
+  entries.forEach(function(e) { B.entries[e.id] = e; }); // exports overlap (60-day window) → the ID keeps one copy
+  var per = { from: dmyToIso(pm[1]), to: dmyToIso(pm[2]), file: info.name || "", importedAt: new Date().toISOString() };
+  B.periods = B.periods.filter(function(p) { return !(p.from === per.from && p.to === per.to); }).concat([per]);
+  savePetty(d);
+  return { ok: true, kind: "petty_xlsx", branch: branch, period: { from: per.from, to: per.to }, entries: entries.length };
+}
+function pettyCoverage(raw, ym) {
+  var B = loadPetty().branches[raw];
+  if (!B) return "none";
+  var first = ym + "-01", last = ym + "-" + String(new Date(+ym.slice(0, 4), +ym.slice(5), 0).getDate()).padStart(2, "0");
+  // periods may chain (each export covers 60 days): walk from the 1st and see if they reach the last day
+  var ps = B.periods.slice().sort(function(a, b) { return a.from.localeCompare(b.from); }), reach = null;
+  var dayAfter = function(d) { return new Date(Date.parse(d + "T00:00:00Z") + 86400000).toISOString().slice(0, 10); };
+  ps.forEach(function(p) { if (p.from <= first && (reach === null || p.to > reach)) reach = p.to; else if (reach !== null && p.from <= dayAfter(reach) && p.to > reach) reach = p.to; });
+  if (reach !== null && reach >= last) return "full";
+  return ps.some(function(p) { return p.from <= last && p.to >= first; }) ? "partial" : "none";
+}
+// petty-cash spending of one month for P&L: [{branch, category (ours), pettyCategory, amount}]
+function pettyCosts(ym, reg, pnl) {
+  var out = [], d = loadPetty(), map = pnl.pettyCatMap || {};
+  Object.keys(d.branches).forEach(function(raw) {
+    var b = mapPosBranch(raw, reg, pnl);
+    Object.values(d.branches[raw].entries).forEach(function(e) {
+      if (e.status !== "สำเร็จ" || !(e.out > 0) || !e.date || e.date.slice(0, 7) !== ym || !/รายจ่าย/.test(e.type)) return;
+      out.push({ branch: b, rawBranch: raw, pettyCategory: e.category || "อื่นๆ", category: map[e.category] || PETTY_CAT, amount: e.out });
+    });
+  });
+  return out;
+}
+
+// read any uploaded / Drive file: xlsx (sales, petty cash) or CSV (statements, payroll)
+async function importAny(buf, info) {
+  if (buf[0] === 0x50 && buf[1] === 0x4B) { // "PK" = xlsx
+    var wb = new ExcelJS.Workbook();
+    try { await wb.xlsx.load(buf); } catch (e) { return { ok: false, error: "cannot open Excel file: " + e.message }; }
+    if (wb.getWorksheet("รายการขาย")) return importSalesWb(wb, info);
+    var pc = wb.getWorksheet("รายการ");
+    if (pc && /petty cash/i.test(String(xv(pc.getCell("A1").value) || ""))) return importPettyWb(wb, info);
+    return { ok: false, skipped: true, error: "Excel file is not a sales or petty-cash report" };
+  }
+  return importStatement(decodeText(buf), info);
+}
+
+// ── Report 2 (5th of the month): overview / P&L, once every document is in ──
+function opBranchesOf(reg, pnl) { return reg.branches.filter(function(b) { return pnl.hqBranches.indexOf(b) === -1; }); }
+function pnlReadiness(y, m) {
+  var ym = ymKey(y, m), reg = loadAccounts(), pnl = loadPnl();
+  var op = opBranchesOf(reg, pnl);
+  var r = { year: y, month: m, ym: ym };
+  var sched = loadSchedule().months[ym] || {};
+  r.expenseDone = !!sched.sentAt || checkMonth(y, m).ready;
+  var S = salesByBranch(ym, reg, pnl);
+  r.salesFile = S.file;
+  r.salesMissing = S.file ? op.filter(function(b) { return !S.data[b]; }) : op.slice();
+  r.salesPartial = !!S.file && !S.fullMonth;
+  r.unmappedBranches = S.unmapped.slice();
+  var petty = loadPetty();
+  Object.keys(petty.branches).forEach(function(raw) { if (!mapPosBranch(raw, reg, pnl) && r.unmappedBranches.indexOf(raw) === -1) r.unmappedBranches.push(raw); });
+  r.pettyMissing = op.filter(function(b) {
+    var raws = Object.keys(petty.branches).filter(function(raw) { return mapPosBranch(raw, reg, pnl) === b; });
+    return !raws.some(function(raw) { return pettyCoverage(raw, ym) === "full"; });
+  });
+  var pl = payrollPlan(y, m);
+  r.payrollMissing = !pl.imported;
+  r.payrollNotApplied = !!pl.imported && !pl.applied;
+  r.ready = r.expenseDone && !r.salesMissing.length && !r.salesPartial && !r.unmappedBranches.length && !r.pettyMissing.length && !r.payrollMissing && !r.payrollNotApplied;
+  return r;
+}
+function pnlReadinessText(r) {
+  if (r.ready) return "✅ Overview " + thMonthRange(r.year, r.month) + " — เอกสารครบแล้ว";
+  var L = ["⏳ Overview / กำไร " + thMonthRange(r.year, r.month) + " ยังออกไม่ได้", "ต้องมีให้ครบก่อน:"];
+  if (!r.expenseDone) L.push("🧾 รีพอตค่าใช้จ่ายยังไม่ผ่าน (/check)");
+  if (r.salesMissing.length) L.push("📊 รีพอตขาย: " + r.salesMissing.join(", "));
+  if (r.salesPartial) L.push("📊 รีพอตขายยังไม่ครบทั้งเดือน");
+  if (r.pettyMissing.length) L.push("💵 Petty cash: " + r.pettyMissing.join(", "));
+  if (r.payrollMissing) L.push("👥 ไฟล์ payroll");
+  if (r.payrollNotApplied) L.push("👥 ยังไม่กด Apply แบ่งเงินเดือนตามสาขา (แท็บ P&L)");
+  if (r.unmappedBranches.length) L.push("🏢 ชื่อสาขาในรีพอตที่ยังไม่ได้จับคู่: " + r.unmappedBranches.join(", "));
+  L.push("", "👉 " + BASE_URL + "/app (ใส่ไฟล์ใน Drive แล้วกด 🔄 หรืออัปโหลด)", "ครบแล้ว overview ออกเองภายใน ~10 นาที", "/overview send = ออกเลยแม้ยังไม่ครบ");
+  return L.join("\n");
+}
+function overviewText(y, m, forced) {
+  var P = pnlMonth(y, m);
+  var line = function(b) { return "  • " + b.branch + ": รายได้ " + baht(b.revenue) + " · ต้นทุน " + baht(b.variable + b.fixed + b.unset) + " · กำไร " + baht(b.profit) + (b.profitPct !== null ? " (" + (b.profitPct * 100).toFixed(1) + "%)" : ""); };
+  return [
+    (forced ? "📊" : "📈") + " Overview " + thMonthRange(y, m) + " พร้อมแล้ว" + (forced ? " (ออกก่อนเอกสารครบ)" : ""),
+    "รายได้ = รายได้ที่รับรู้ (บริการที่ทำแล้ว)"
+  ].concat(P.branches.map(line)).concat([
+    "🏦 รวม: รายได้ " + baht(P.company.revenue) + " · กำไร " + baht(P.company.profit) + (P.company.profitPct !== null ? " (" + (P.company.profitPct * 100).toFixed(1) + "%)" : ""),
+    "", "📊 Dashboard: " + BASE_URL + "/app (แท็บ 💹 P&L)", "⬇️ Excel: " + reportLink(y, m)
+  ]).join("\n");
+}
+async function sendOverviewReport(to, y, m, forced) {
+  var pn = loadPnl(); snapshotAlloc(pn, ymKey(y, m)); savePnl(pn);
+  await makeReport(y, m);
+  await pushText(to, overviewText(y, m, forced));
+}
+
 // ── Month helpers / readiness check ────────────────────────────────────────
 var TH_MONTHS = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
 function thMonth(y, m) { return TH_MONTHS[m - 1] + " " + y; }
@@ -712,14 +1372,20 @@ function checkMonth(y, m) {
     if (d) r.duplicates.push({ id: p.id, display_id: showId(p), of: showId(d), date: p.transaction_date, amount: Number(p.amount) || 0, recipient: p.recipient_name || "" });
     if (recipientLooksLikeSender(p, reg)) r.recipientUnclear.push(showId(p));
   });
-  r.ready = !r.missingBill.length && !r.noCategory.length && !r.pendingInternal.length && !r.unassigned.length && !r.noDate.length && !r.suspectDate.length && !r.duplicates.length && !r.recipientUnclear.length;
+  // bank statements: money out with no slip, slips the bank never shows, accounts without this month's statement
+  var rc = reconMonth(y, m);
+  r.stmtNoSlip = rc.noSlip.map(function(l) { return { id: l.id, date: l.date, time: l.time, amount: l.out, account: acctLabelOf(lineAccount(reg, l)), desc: l.desc, counterparty: l.counterparty, candidates: l.candidates }; });
+  r.notInStatement = rc.notInStatement.map(function(id) { var p = all.find(function(x) { return x.id === id; }); return p ? showId(p) : String(id); });
+  r.missingStatements = rc.missingStatements;
+  r.ready = !r.missingBill.length && !r.noCategory.length && !r.pendingInternal.length && !r.unassigned.length && !r.noDate.length && !r.suspectDate.length && !r.duplicates.length && !r.recipientUnclear.length &&
+    !r.stmtNoSlip.length && !r.notInStatement.length && !r.missingStatements.length;
   // numeric ids per problem + the records themselves (web page shows picture / details and fixes in place)
   var byShow = {};
   all.forEach(function(p) { byShow[showId(p)] = p; });
   var toIds = function(arr) { return arr.map(function(d) { return byShow[d] ? byShow[d].id : null; }).filter(function(x) { return x !== null; }); };
   r.items = {
     missingBill: toIds(r.missingBill), noCategory: toIds(r.noCategory), pendingInternal: toIds(r.pendingInternal),
-    noDate: toIds(r.noDate), recipientUnclear: toIds(r.recipientUnclear),
+    noDate: toIds(r.noDate), recipientUnclear: toIds(r.recipientUnclear), notInStatement: toIds(r.notInStatement),
     duplicates: r.duplicates.map(function(d) { return [d.id, byShow[d.of] ? byShow[d.of].id : null]; })
   };
   var need = {};
@@ -742,6 +1408,154 @@ function monthTotals(y, m) {
   return t;
 }
 
+// ── P&L: revenue, fixed / variable costs, HQ cost sharing ─────────────────
+// pnl.json = { costTypes: {category: type}, hqBranches: [name], months: { "YYYY-MM": { revenue: {branch: amount}, alloc: {mode, pct} } } }
+// Each month keeps its own HQ-sharing setting, so changing it later never rewrites earlier months.
+const PNL_FILE = path.join(DATA_DIR, "pnl.json");
+var COST_TYPES = ["fixed", "variable", "capex", "unset"];
+function loadPnl() {
+  var d = loadJsonFile(PNL_FILE, null) || {};
+  if (!d.costTypes) d.costTypes = {};
+  if (!d.months) d.months = {};
+  if (!Array.isArray(d.hqBranches)) {
+    d.hqBranches = loadAccounts().branches.filter(function(b) { return /main|\bhq\b|head ?office|ส่วนกลาง|สำนักงานใหญ่/i.test(b); });
+  }
+  return d;
+}
+function savePnl(d) { fs.writeFileSync(PNL_FILE, JSON.stringify(d, null, 2)); }
+// suggested type for the standard categories; anything else stays "unset" until the owner picks
+function defaultCostType(cat) {
+  var c = String(cat || "").toLowerCase();
+  if (/rent|ค่าเช่า|salary|เงินเดือน|tax|sso|ประกันสังคม|utilit|ค่าน้ำ|ค่าไฟ|accounting|ค่าบัญชี/.test(c)) return "fixed";
+  if (/medicine|ยา|doctor|หมอ|nursing|พยาบาล|bonus|โบนัส|commission|ค่าคอม|ค่ามือ|logistic|ขนส่ง/.test(c)) return "variable";
+  if (/equipment|อุปกรณ์/.test(c)) return "capex";
+  return "unset";
+}
+function costTypeOf(cat, pnl) {
+  if (cat && pnl.costTypes[cat]) return pnl.costTypes[cat];
+  return defaultCostType(cat);
+}
+function costYm(p) { return p.cost_month || (p.transaction_date || "").slice(0, 7); }
+// HQ share % per operating branch for one month (revenue mode = by that month's sales)
+function allocFor(ym, pnl, opBranches, revenue) {
+  var md = pnl.months[ym] || {};
+  var a = md.alloc || { mode: "revenue" };
+  var pct = {};
+  if (a.mode === "custom" && a.pct) {
+    opBranches.forEach(function(b) { pct[b] = Number(a.pct[b]) || 0; });
+  } else {
+    var rev = revenue || md.revenue || {};
+    var tot = opBranches.reduce(function(s, b) { return s + (Number(rev[b]) || 0); }, 0);
+    var mode = (a.mode === "equal" || tot <= 0) ? "equal" : "revenue";
+    opBranches.forEach(function(b) { pct[b] = opBranches.length ? (mode === "equal" ? 100 / opBranches.length : (Number(rev[b]) || 0) / tot * 100) : 0; });
+    a = { mode: a.mode === "equal" ? "equal" : "revenue", fallbackEqual: mode === "equal" && a.mode !== "equal" };
+  }
+  return { mode: a.mode, pct: pct, fallbackEqual: !!a.fallbackEqual, saved: !!md.alloc };
+}
+// freeze this month's sharing setting (called when revenue / setting for the month is saved)
+function snapshotAlloc(pnl, ym) {
+  if (!pnl.months[ym]) pnl.months[ym] = {};
+  if (pnl.months[ym].alloc) return;
+  var prev = Object.keys(pnl.months).filter(function(k) { return k < ym && pnl.months[k].alloc; }).sort().pop();
+  var pa = prev ? pnl.months[prev].alloc : null;
+  pnl.months[ym].alloc = pa && pa.mode === "custom" ? { mode: "custom", pct: Object.assign({}, pa.pct) } : { mode: pa ? pa.mode : "revenue" };
+}
+
+function pnlMonth(y, m) {
+  var ym = ymKey(y, m);
+  var reg = loadAccounts(), pnl = loadPnl();
+  var hq = pnl.hqBranches.filter(function(b) { return reg.branches.indexOf(b) !== -1; });
+  var op = reg.branches.filter(function(b) { return hq.indexOf(b) === -1; });
+  var manualRev = (pnl.months[ym] || {}).revenue || {};
+  var S = salesByBranch(ym, reg, pnl);
+  // revenue = recognised revenue from the POS report; typed-in sales only when there is no report
+  var rev = {}, revSource = {};
+  op.forEach(function(b) {
+    if (S.data[b]) { rev[b] = S.data[b].recognized; revSource[b] = "sales report"; }
+    else if (Number(manualRev[b]) > 0) { rev[b] = Number(manualRev[b]); revSource[b] = "typed in"; }
+  });
+  var al = allocFor(ym, pnl, op, rev);
+  function blank() { return { variable: 0, fixed: 0, unset: 0, capex: 0, cats: {} }; }
+  var direct = {}, hqCost = blank(), unassigned = blank();
+  op.forEach(function(b) { direct[b] = blank(); });
+  function add(bucket, type, cat, amt) {
+    bucket[type] += amt;
+    var k = cat || "Uncategorized";
+    if (!bucket.cats[k]) bucket.cats[k] = { amount: 0, type: type };
+    bucket.cats[k].amount += amt;
+  }
+  // a branch whose petty-cash report is in: its spending counts from the report, so a bank top-up of its petty cash is just moving money
+  var pettyIn = {};
+  Object.keys(loadPetty().branches).forEach(function(raw) { var b = mapPosBranch(raw, reg, pnl); if (b && pettyCoverage(raw, ym) !== "none") pettyIn[b] = true; });
+  loadPayments().forEach(function(p) {
+    if (costYm(p) !== ym) return;
+    var c = classify(p, reg);
+    if (c.kind === "internal") return;
+    if (c.kind === "petty_cash" && pettyIn[c.toBranch]) return;
+    var type = (p.cost_type && COST_TYPES.indexOf(p.cost_type) !== -1) ? p.cost_type : costTypeOf(c.category, pnl);
+    c.alloc.forEach(function(a) {
+      var bucket = direct[a.branch] || (hq.indexOf(a.branch) !== -1 ? hqCost : unassigned);
+      add(bucket, type, c.category, a.amount);
+    });
+  });
+  // cash spent from the shop's petty cash (no slips)
+  pettyCosts(ym, reg, pnl).forEach(function(e) {
+    var bucket = (e.branch && direct[e.branch]) || (e.branch && hq.indexOf(e.branch) !== -1 ? hqCost : unassigned);
+    add(bucket, costTypeOf(e.category, pnl), e.category, e.amount);
+  });
+  var r2 = function(n) { return Math.round(n * 100) / 100; };
+  var branches = op.map(function(b) {
+    var d = direct[b], share = (al.pct[b] || 0) / 100;
+    var t = { variable: d.variable + hqCost.variable * share, fixed: d.fixed + hqCost.fixed * share, unset: d.unset + hqCost.unset * share, capex: d.capex + hqCost.capex * share };
+    var cats = {};
+    [[d.cats, 1], [hqCost.cats, share]].forEach(function(x) {
+      Object.keys(x[0]).forEach(function(k) {
+        if (!cats[k]) cats[k] = { amount: 0, type: x[0][k].type };
+        cats[k].amount += x[0][k].amount * x[1];
+      });
+    });
+    var revenue = Number(rev[b]) || 0;
+    var sd = S.data[b];
+    var cm = revenue - t.variable;
+    var cmPct = revenue > 0 ? cm / revenue : null;
+    var fixedAll = t.fixed + t.unset;
+    var profit = cm - fixedAll;
+    var be = cmPct && cmPct > 0 ? fixedAll / cmPct : null;
+    return {
+      branch: b, revenue: revenue, revenueSource: revSource[b] || null,
+      billed: sd ? sd.sales : null, received: sd ? { cash: sd.cash, transfer: sd.transfer, card: sd.card, wallet: sd.wallet, online: sd.online } : null,
+      deferredAdded: sd ? sd.deferredAdded : null, deferredUsed: sd ? sd.deferredUsed : null, bills: sd ? sd.bills : null,
+      hqSharePct: r2(al.pct[b] || 0),
+      hqShare: r2((hqCost.variable + hqCost.fixed + hqCost.unset) * share),
+      variable: r2(t.variable), fixed: r2(t.fixed), unset: r2(t.unset), capex: r2(t.capex),
+      cm: r2(cm), cmPct: cmPct, profit: r2(profit), profitPct: revenue > 0 ? profit / revenue : null,
+      breakeven: be === null ? null : r2(be), mos: be !== null && revenue > 0 ? (revenue - be) / revenue : null,
+      cats: Object.keys(cats).map(function(k) { return { category: k, type: cats[k].type, amount: r2(cats[k].amount), pctOfRevenue: revenue > 0 ? cats[k].amount / revenue : null }; })
+        .sort(function(a, b2) { return b2.amount - a.amount; })
+    };
+  });
+  var sum = function(f) { return r2(branches.reduce(function(s, b) { return s + b[f]; }, 0)); };
+  var company = { revenue: sum("revenue"), variable: sum("variable"), fixed: sum("fixed"), unset: sum("unset"), capex: sum("capex"),
+    billed: branches.some(function(b) { return b.billed !== null; }) ? r2(branches.reduce(function(s, b) { return s + (b.billed || 0); }, 0)) : null };
+  company.profit = r2(company.revenue - company.variable - company.fixed - company.unset);
+  company.profitPct = company.revenue > 0 ? company.profit / company.revenue : null;
+  var warnings = [];
+  var missingRev = op.filter(function(b) { return !(Number(rev[b]) > 0); });
+  if (missingRev.length) warnings.push("ยังไม่มีรายได้ (รีพอตขาย): " + missingRev.join(", "));
+  if (S.unmapped.length) warnings.push("ชื่อสาขาในรีพอตขายที่ยังไม่ได้จับคู่: " + S.unmapped.join(", "));
+  if (!op.length) warnings.push("ยังไม่มีสาขาที่มียอดขาย — ติ๊กสาขาส่วนกลาง (HQ) ใน Dashboard → Settings");
+  if (company.unset > 0) warnings.push("มีค่าใช้จ่ายที่ยังไม่ได้เลือก Fixed/Variable " + baht(company.unset) + " (นับเป็น fixed ไปก่อน)");
+  var unassignedTotal = unassigned.variable + unassigned.fixed + unassigned.unset + unassigned.capex;
+  if (unassignedTotal > 0) warnings.push("ค่าใช้จ่ายที่ยังไม่รู้สาขา " + baht(unassignedTotal) + " ไม่ได้รวมในสาขาใด");
+  if (al.fallbackEqual) warnings.push("ยังไม่มียอดขาย จึงหารต้นทุนส่วนกลางเท่า ๆ กันไปก่อน");
+  return {
+    ym: ym, year: y, month: m, branches: branches, company: company, hqBranches: hq, alloc: al,
+    hqCost: { variable: r2(hqCost.variable), fixed: r2(hqCost.fixed), unset: r2(hqCost.unset), capex: r2(hqCost.capex) },
+    unassigned: r2(unassignedTotal), warnings: warnings,
+    salesFile: S.file,
+    caveat: "รายได้ = รายได้ที่รับรู้จากรีพอตขาย · ต้นทุน = สลิป/statement + petty cash — ยังไม่รวมรายการบัตรเครดิตรายตัว"
+  };
+}
 function idList(ids) { return ids.slice(0, 8).map(function(i) { return "#" + i; }).join(" ") + (ids.length > 8 ? " +" + (ids.length - 8) : ""); }
 function readinessText(r) {
   if (r.ready) return "✅ " + thMonthRange(r.year, r.month) + " ครบแล้ว — " + r.count + " รายการ" + (r.inbox ? "\n📥 Inbox ค้าง " + r.inbox + " รูป (ไม่บล็อก)" : "");
@@ -751,6 +1565,9 @@ function readinessText(r) {
   if (r.noDate.length) lines.push("📅 ไม่มีวันที่: " + r.noDate.length + " — " + idList(r.noDate));
   if (r.duplicates.length) lines.push("♊ อาจซ้ำ: " + r.duplicates.length + " — " + r.duplicates.slice(0, 6).map(function(d) { return "#" + d.display_id + "=#" + d.of; }).join(" ") + (r.duplicates.length > 6 ? " +" + (r.duplicates.length - 6) : ""));
   if (r.recipientUnclear.length) lines.push("❓ ผู้รับไม่ชัด: " + r.recipientUnclear.length + " — " + idList(r.recipientUnclear));
+  if (r.stmtNoSlip.length) lines.push("🏦 มีใน statement แต่ไม่มีสลิป: " + r.stmtNoSlip.length + " รายการ (" + baht(r.stmtNoSlip.reduce(function(s, l) { return s + l.amount; }, 0)) + ")");
+  if (r.notInStatement.length) lines.push("🔍 สลิปที่ไม่เจอใน statement: " + r.notInStatement.length + " — " + idList(r.notInStatement));
+  if (r.missingStatements.length) lines.push("📄 ยังไม่มี statement: " + r.missingStatements.join(", "));
   if (r.suspectDate.length) lines.push("📅 ปีน่าสงสัย (ห่างจากวันอัปโหลด): " + r.suspectDate.length + " — " + idList(r.suspectDate.map(function(x) { return x.display_id; })));
   if (r.unassigned.length) lines.push("🆕 บัญชียังไม่ระบุสาขา: " + r.unassigned.slice(0, 5).join(", ") + (r.unassigned.length > 5 ? " +" + (r.unassigned.length - 5) : ""));
   if (r.pendingInternal.length) lines.push("🔁 รอยืนยันโอนภายใน: " + r.pendingInternal.length + " — " + idList(r.pendingInternal));
@@ -770,7 +1587,8 @@ function reportReadyText(y, m, forced) {
     br.length ? "🏢 แยกสาขา:\n" + br.join("\n") : null,
     "",
     "⬇️ Download Excel:",
-    BASE_URL + "/api/report?year=" + y + "&month=" + m
+    reportLink(y, m),
+    "(ลิงก์ใช้ได้ " + LINK_DAYS_REPORT + " วัน · หลังจากนั้นโหลดได้ที่ /app → Report)"
   ].filter(function(l) { return l !== null; }).join("\n");
 }
 
@@ -914,6 +1732,57 @@ async function makeReport(year, month) {
   it.getCell(3).numFmt="#,##0.00"; it.eachCell(function(c){c.font={bold:true};});
   s4.columns=[{width:9},{width:12},{width:14},{width:24},{width:16},{width:24},{width:16},{width:28},{width:30}];
 
+  // P&L by branch (by cost month; HQ costs shared by this month's frozen setting)
+  const P = pnlMonth(year, month);
+  if (P.branches.length) {
+    const s5 = wb.addWorksheet("P&L by Branch");
+    var lastP = String.fromCharCode(65 + Math.min(P.branches.length + 1, 25));
+    s5.mergeCells("A1:" + lastP + "1");
+    var t5 = s5.getCell("A1"); t5.value = "P&L by Branch — " + label;
+    t5.font={size:13,bold:true,color:{argb:"FFFFFFFF"}}; t5.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FF2E7D32"}}; t5.alignment={horizontal:"center"}; s5.getRow(1).height=28;
+    s5.addRow([P.caveat]).getCell(1).font = { italic: true, color: { argb: "FF757575" } };
+    styleHdr(s5.addRow([""].concat(P.branches.map(function(b){ return b.branch; })).concat(["Company"])), "FF2E7D32");
+    var money = function(lbl, f, comp, bold) {
+      var r = s5.addRow([lbl].concat(P.branches.map(function(b){ return b[f]; })).concat([comp]));
+      for (var ci = 2; ci <= P.branches.length + 2; ci++) r.getCell(ci).numFmt = "#,##0.00";
+      if (bold) r.eachCell(function(c){ c.font = { bold: true }; c.fill = { type:"pattern", pattern:"solid", fgColor:{ argb:"FFF1F8E9" } }; });
+    };
+    var pctRow = function(lbl, f) {
+      s5.addRow([lbl].concat(P.branches.map(function(b){ return b[f] === null ? "-" : (b[f] * 100).toFixed(1) + "%"; })).concat([""]));
+    };
+    var C = P.company;
+    money("Revenue (ยอดขาย)", "revenue", C.revenue, true);
+    if (C.billed !== null) {
+      money("  Billed sales (after discounts)", "billed", C.billed);
+      var recRow = s5.addRow(["  Money received (cash + transfer + card + online)"].concat(P.branches.map(function(b) { return b.received ? round2(b.received.cash + b.received.transfer + b.received.card + b.received.online) : null; })).concat([""]));
+      for (var rci = 2; rci <= P.branches.length + 1; rci++) recRow.getCell(rci).numFmt = "#,##0.00";
+    }
+    money("Variable cost", "variable", C.variable);
+    money("Contribution margin", "cm", C.revenue - C.variable, true);
+    pctRow("CM %", "cmPct");
+    money("Fixed cost", "fixed", C.fixed);
+    money("Not classified (counted as fixed)", "unset", C.unset);
+    money("  of which HQ share", "hqShare", "");
+    pctRow("  HQ share %", "hqSharePct");
+    money("Operating profit", "profit", C.profit, true);
+    pctRow("Profit %", "profitPct");
+    money("Break-even revenue", "breakeven", "");
+    pctRow("Margin of safety", "mos");
+    money("Investment (capex, not in profit)", "capex", C.capex);
+    s5.addRow([]);
+    styleHdr(s5.addRow(["Cost as % of revenue"].concat(P.branches.map(function(b){ return b.branch; })).concat(["Type"])), "FF2E7D32");
+    var catNames = {};
+    P.branches.forEach(function(b){ b.cats.forEach(function(c){ catNames[c.category] = c.type; }); });
+    Object.keys(catNames).forEach(function(cat) {
+      s5.addRow([cat].concat(P.branches.map(function(b){
+        var c = b.cats.find(function(x){ return x.category === cat; });
+        return c && c.pctOfRevenue !== null ? (c.pctOfRevenue * 100).toFixed(1) + "%" : (c ? c.amount.toLocaleString("th-TH") : "-");
+      })).concat([catNames[cat]]));
+    });
+    if (P.warnings.length) { s5.addRow([]); P.warnings.forEach(function(w){ s5.addRow(["⚠️ " + w]).getCell(1).font = { color: { argb: "FFBF360C" } }; }); }
+    s5.columns = [{ width: 36 }].concat(P.branches.map(function(){ return { width: 18 }; })).concat([{ width: 18 }]);
+  }
+
   var accountGroups={};
   rows.forEach(function(p){
     var nb=normalizeBank(p.bank_from);
@@ -966,7 +1835,7 @@ async function makeReport(year, month) {
       row.getCell(3).value=Number(p.amount)||0; row.getCell(3).numFmt="#,##0.00"; row.getCell(3).font={bold:true,color:{argb:"FF1565C0"}};
       row.getCell(4).value=p.purpose||""; row.getCell(4).alignment={wrapText:true,vertical:"middle"};
       if(p.imageFile){
-        row.getCell(5).value={text:"🔗 View Slip",hyperlink:baseUrl+"/slips/"+p.imageFile};
+        row.getCell(5).value={text:"🔗 View Slip",hyperlink:signedUrl("/slips/"+p.imageFile, LINK_DAYS_FILES)};
         row.getCell(5).font={color:{argb:"FF1565C0"},underline:true,bold:true};
       } else {
         row.getCell(5).value="No slip image";
@@ -976,7 +1845,7 @@ async function makeReport(year, month) {
       for(bi=0;bi<maxBills;bi++){
         var cell=row.getCell(6+bi);
         if(bills[bi]){
-          cell.value={text:"🔗 View Bill"+(maxBills>1?(" "+(bi+1)):""),hyperlink:baseUrl+"/bills/"+bills[bi]};
+          cell.value={text:"🔗 View Bill"+(maxBills>1?(" "+(bi+1)):""),hyperlink:signedUrl("/bills/"+bills[bi], LINK_DAYS_FILES)};
           cell.font={color:{argb:"FF2E7D32"},underline:true,bold:true};
         } else if(bi===0){
           if(p.evidence_note){
@@ -1032,6 +1901,7 @@ function remindSlot(h) {
 function pushText(to, text) { return client.pushMessage(to, { type: "text", text: text }); }
 
 async function sendMonthlyReport(to, y, m, forced) {
+  var pn = loadPnl(); snapshotAlloc(pn, ymKey(y, m)); savePnl(pn); // freeze this month's HQ sharing
   await makeReport(y, m); // fail here (not in the user's download) if something is broken
   await pushText(to, reportReadyText(y, m, forced));
 }
@@ -1043,6 +1913,13 @@ function markReportSent(y, m, forced) {
 }
 
 var ticking = false;
+// report 1 (1st): expenses match slips / bills / statements · report 2 (5th): overview / P&L once every document is in
+var REPORT_JOBS = [
+  { state: "months", start: "startReportMonth", day: 1, check: function(y, m) { return checkMonth(y, m); }, text: function(r) { return readinessText(r); },
+    send: function(to, y, m) { return sendMonthlyReport(to, y, m, false); } },
+  { state: "pnl", start: "pnlStartMonth", day: 5, check: function(y, m) { return pnlReadiness(y, m); }, text: function(r) { return pnlReadinessText(r); },
+    send: function(to, y, m) { return sendOverviewReport(to, y, m, false); } }
+];
 async function scheduleTick(nowMs) {
   if (ticking) return;
   ticking = true;
@@ -1050,35 +1927,42 @@ async function scheduleTick(nowMs) {
     var to = reportRecipient();
     if (!to) return;
     var t = bkkNow(nowMs);
-    var st = loadSchedule();
-    if (!st.startReportMonth) {
-      // first run: don't chase months whose report day already passed before this feature existed
-      var nx = t.m === 12 ? { y: t.y + 1, m: 1 } : { y: t.y, m: t.m + 1 };
-      st.startReportMonth = t.day === 1 ? ymKey(t.y, t.m) : ymKey(nx.y, nx.m);
-      saveSchedule(st);
-    }
     var cur = ymKey(t.y, t.m);
-    var ry = +st.startReportMonth.slice(0, 4), rm = +st.startReportMonth.slice(5);
-    while (ymKey(ry, rm) <= cur) {
-      var tg = prevMonthOf(ry, rm);
-      var k = ymKey(tg.y, tg.m);
-      var ms = st.months[k] || {};
-      var slot = remindSlot(t.h);
-      if (!ms.sentAt && (ms.firstAt || slot !== null)) {
-        var chk = checkMonth(tg.y, tg.m);
-        if (chk.ready) {
-          await sendMonthlyReport(to, tg.y, tg.m, false);
-          ms.sentAt = new Date().toISOString();
-        } else if (slot !== null && ms.lastSlot !== t.date + "_" + slot) {
-          await pushText(to, readinessText(chk));
-          ms.lastSlot = t.date + "_" + slot;
-          ms.reminders = (ms.reminders || 0) + 1;
-        }
-        if (!ms.firstAt) ms.firstAt = new Date().toISOString();
-        st.months[k] = ms;
+    var slot = remindSlot(t.h);
+    for (var j = 0; j < REPORT_JOBS.length; j++) {
+      var job = REPORT_JOBS[j];
+      var st = loadSchedule();
+      if (!st[job.state]) st[job.state] = {};
+      if (!st[job.start]) {
+        // first run: don't chase months whose report day already passed before this feature existed
+        var nx = t.m === 12 ? { y: t.y + 1, m: 1 } : { y: t.y, m: t.m + 1 };
+        st[job.start] = t.day <= job.day ? cur : ymKey(nx.y, nx.m);
         saveSchedule(st);
       }
-      if (rm === 12) { ry++; rm = 1; } else rm++;
+      var ry = +st[job.start].slice(0, 4), rm = +st[job.start].slice(5);
+      while (ymKey(ry, rm) <= cur) {
+        var due = ymKey(ry, rm) < cur || t.day >= job.day;
+        var tg = prevMonthOf(ry, rm);
+        var k = ymKey(tg.y, tg.m);
+        var ms = st[job.state][k] || {};
+        if (due && !ms.sentAt && (ms.firstAt || slot !== null)) {
+          var chk = job.check(tg.y, tg.m);
+          if (chk.ready) {
+            await job.send(to, tg.y, tg.m);
+            ms.sentAt = new Date().toISOString();
+          } else if (slot !== null && ms.lastSlot !== t.date + "_" + slot) {
+            await pushText(to, job.text(chk));
+            ms.lastSlot = t.date + "_" + slot;
+            ms.reminders = (ms.reminders || 0) + 1;
+          }
+          if (!ms.firstAt) ms.firstAt = new Date().toISOString();
+          st = loadSchedule();
+          if (!st[job.state]) st[job.state] = {};
+          st[job.state][k] = ms;
+          saveSchedule(st);
+        }
+        if (rm === 12) { ry++; rm = 1; } else rm++;
+      }
     }
   } catch (e) {
     console.error("Schedule tick error:", e.message);
@@ -1163,7 +2047,7 @@ async function handleEvent(event) {
     }
 
     // ── /notify here — this private chat receives the monthly report & reminders ──
-    if (tl === "/notify here" || tl === "/notify off") {
+    if (tl === "/notify" || tl === "/notify here" || tl === "/notify off") {
       if (process.env.REPORT_LINE_ID) return client.replyMessage(event.replyToken, { type: "text", text: "ℹ️ ผู้รับ report ถูกตั้งไว้ใน env REPORT_LINE_ID แล้ว — แก้ได้ที่ Railway" });
       if (event.source.type !== "user") return client.replyMessage(event.replyToken, { type: "text", text: "⚠️ ใช้ได้เฉพาะแชทส่วนตัวกับ bot (ไม่รับในกลุ่ม เพื่อประหยัดโควตาข้อความ)" });
       var stN = loadSettings();
@@ -1227,6 +2111,9 @@ async function handleEvent(event) {
           "/notify here — send it to this chat",
           "/check — is last month ready?",
           "/report send — release last month now",
+          "/overview — is the 5th-of-month overview ready?",
+          "/overview send — release the overview now",
+          "/revenue 2026 10 Samui 2010869 — sales (if no sales report)",
           "/help — this menu"
         ].join("\n")
       });
@@ -1264,11 +2151,51 @@ async function handleEvent(event) {
         var total = monthTotals(year, month).expense;
         var withBill = filtered.filter(function(p){return getBillFiles(p).length > 0;}).length;
         var accts = {}; filtered.forEach(function(p){accts[normalizeBank(p.bank_from)+" ****"+(p.account_from||"????")] = true;});
-        return client.pushMessage(gid, { type: "text", text: ["✅ Report ready — "+format(new Date(year,month-1),"MMMM yyyy"),"📋 "+filtered.length+" transactions","💰 ฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2})+" (excl. internal)","🏦 "+Object.keys(accts).length+" account sheet(s)","📎 Bill evidence: "+withBill+"/"+filtered.length,"","⬇️ Download Excel:",BASE_URL+"/api/report?year="+year+"&month="+month].join("\n") });
+        return client.pushMessage(gid, { type: "text", text: ["✅ Report ready — "+format(new Date(year,month-1),"MMMM yyyy"),"📋 "+filtered.length+" transactions","💰 ฿"+total.toLocaleString("th-TH",{minimumFractionDigits:2})+" (excl. internal)","🏦 "+Object.keys(accts).length+" account sheet(s)","📎 Bill evidence: "+withBill+"/"+filtered.length,"","⬇️ Download Excel (link valid "+LINK_DAYS_REPORT+" days):",reportLink(year, month)].join("\n") });
       } catch(err) {
         console.error("Report error:", err.message);
         return client.pushMessage(gid, { type: "text", text: "❌ Report error: " + err.message });
       }
+    }
+
+    // ── /overview [send] [YYYY MM] — report 2 (P&L) readiness, or release it now ──
+    if (tl.indexOf("/overview") === 0) {
+      var op2 = txt.split(/\s+/), force = /^send$/i.test(op2[1] || "");
+      var opm = prevMonthOf(bkkNow().y, bkkNow().m);
+      var oy = parseInt(op2[force ? 2 : 1]) || opm.y, om = parseInt(op2[force ? 3 : 2]) || opm.m;
+      var orr = pnlReadiness(oy, om);
+      if (!force) {
+        await client.replyMessage(event.replyToken, { type: "text", text: pnlReadinessText(orr) });
+        if (orr.ready && uid === reportRecipient()) scheduleTick().catch(function() {});
+        return;
+      }
+      try {
+        await sendOverviewReport(gid, oy, om, !orr.ready);
+        var sto = loadSchedule(); if (!sto.pnl) sto.pnl = {};
+        sto.pnl[ymKey(oy, om)] = Object.assign(sto.pnl[ymKey(oy, om)] || {}, { sentAt: new Date().toISOString(), forced: !orr.ready });
+        saveSchedule(sto);
+      } catch (err) { return client.pushMessage(gid, { type: "text", text: "❌ Overview error: " + err.message }); }
+      return;
+    }
+
+    // ── /revenue YYYY MM <branch> <amount> — monthly sales for the P&L ──
+    if (tl.indexOf("/revenue") === 0) {
+      var rv = txt.match(/^\/revenue\s+(\d{4})\s+(\d{1,2})\s+(.+?)\s+([\d,\.]+)\s*$/i);
+      var brs = loadAccounts().branches;
+      if (!rv) return client.replyMessage(event.replyToken, { type: "text", text: "พิมพ์: /revenue 2026 10 Samui 2010869\nสาขา: " + (brs.join(", ") || "(ยังไม่มี)") });
+      var bName = brs.find(function(b) { return b.toLowerCase() === rv[3].trim().toLowerCase(); });
+      if (!bName) return client.replyMessage(event.replyToken, { type: "text", text: "⚠️ ไม่รู้จักสาขา \"" + rv[3] + "\" — มี: " + brs.join(", ") });
+      var rym = ymKey(+rv[1], +rv[2]);
+      var pn = loadPnl();
+      snapshotAlloc(pn, rym);
+      if (!pn.months[rym].revenue) pn.months[rym].revenue = {};
+      pn.months[rym].revenue[bName] = Number(rv[4].replace(/,/g, ""));
+      savePnl(pn);
+      return client.replyMessage(event.replyToken, { type: "text", text: "💰 ยอดขาย " + bName + " " + thMonth(+rv[1], +rv[2]) + ": " + baht(pn.months[rym].revenue[bName]) });
+    }
+
+    if (tl.charAt(0) === "/") {
+      return client.replyMessage(event.replyToken, { type: "text", text: "❓ ไม่รู้จักคำสั่ง " + txt.split(/\s+/)[0] + " — พิมพ์ /help ดูรายการคำสั่ง" });
     }
 
     // Text after a slip: "note:" = evidence note, plain = purpose (window stays open 5 min)
@@ -1294,24 +2221,92 @@ async function handleEvent(event) {
 }
 
 // ── Web auth ───────────────────────────────────────────────────────────────
-const sessions = {};
+// Sessions live on the volume so a redeploy doesn't log everyone out.
+// The token also goes in an HttpOnly cookie so <img> tags and downloads (which can't send headers) are authorised.
+const SESS_FILE = path.join(DATA_DIR, "sessions.json");
+const SESSION_MS = 12 * 3600 * 1000;
+const sessions = loadJsonFile(SESS_FILE, null) || {};
+var sessSaveTimer = null;
+function saveSessionsSoon() {
+  if (sessSaveTimer) return;
+  sessSaveTimer = setTimeout(function() {
+    sessSaveTimer = null;
+    var now = Date.now();
+    Object.keys(sessions).forEach(function(k) { if (sessions[k] < now) delete sessions[k]; });
+    try { fs.writeFileSync(SESS_FILE, JSON.stringify(sessions)); } catch (e) { console.error("Session save:", e.message); }
+  }, 2000);
+}
+function cookieToken(req) {
+  var m = /(?:^|;\s*)st_auth=([a-f0-9]+)/.exec(req.headers.cookie || "");
+  return m ? m[1] : null;
+}
+function sessionOk(req) {
+  var t = req.headers["x-auth"] || cookieToken(req);
+  if (!t || !sessions[t] || sessions[t] < Date.now()) return null;
+  sessions[t] = Date.now() + SESSION_MS;
+  saveSessionsSoon();
+  return t;
+}
+function setAuthCookie(req, res, t) {
+  var secure = req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", "st_auth=" + (t || "") + "; Path=/; HttpOnly; SameSite=Lax" + secure + "; Max-Age=" + (t ? SESSION_MS / 1000 : 0));
+}
 function auth(req, res, next) {
-  var t = req.headers["x-auth"];
-  if (t && sessions[t] && sessions[t] > Date.now()) {
-    sessions[t] = Date.now() + 12 * 3600 * 1000;
-    return next();
-  }
+  if (sessionOk(req)) return next();
   res.status(401).json({ error: "unauthorized" });
+}
+
+// ── Signed, expiring links for LINE messages and Excel files (no login needed while valid) ──
+function linkSecret() {
+  if (process.env.LINK_SECRET) return process.env.LINK_SECRET;
+  var st = loadSettings();
+  if (!st.linkSecret) { st.linkSecret = crypto.randomBytes(32).toString("hex"); saveSettings(st); }
+  return st.linkSecret;
+}
+function linkSig(pathname, year, month, exp) {
+  return crypto.createHmac("sha256", linkSecret()).update(pathname + "|" + (year || "") + "|" + (month || "") + "|" + exp).digest("hex").slice(0, 32);
+}
+var LINK_DAYS_REPORT = 7, LINK_DAYS_FILES = 90;
+function signedUrl(pathname, days, year, month) {
+  var exp = Math.floor(Date.now() / 1000) + days * 86400;
+  var q = (year ? "year=" + year + "&month=" + month + "&" : "") + "exp=" + exp + "&sig=" + linkSig(pathname, year, month, exp);
+  return BASE_URL + pathname + "?" + q;
+}
+function reportLink(y, m) { return signedUrl("/api/report", LINK_DAYS_REPORT, y, m); }
+function signatureOk(req) {
+  var exp = parseInt(req.query.exp), sig = String(req.query.sig || "");
+  if (!exp || !sig || exp * 1000 < Date.now()) return false;
+  var want = linkSig(req.originalUrl.split("?")[0], req.query.year, req.query.month, exp);
+  return sig.length === want.length && crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(want));
+}
+function authOrSigned(req, res, next) {
+  if (signatureOk(req) || sessionOk(req)) return next();
+  res.status(401).send("🔒 This link has expired or needs login. Open " + BASE_URL + "/app (log in), then download again.");
 }
 
 app.post("/api/login", function(req, res) {
   if (!WEB_PASSWORD) return res.status(500).json({ error: "WEB_PASSWORD not set on server" });
   if ((req.body && req.body.password) === WEB_PASSWORD) {
     var token = crypto.randomBytes(24).toString("hex");
-    sessions[token] = Date.now() + 12 * 3600 * 1000;
+    sessions[token] = Date.now() + SESSION_MS;
+    saveSessionsSoon();
+    setAuthCookie(req, res, token);
     return res.json({ token: token });
   }
   res.status(401).json({ error: "wrong password" });
+});
+// re-issue the cookie for a browser that is already logged in (header token)
+app.get("/api/session", function(req, res) {
+  var t = sessionOk(req);
+  if (!t) return res.status(401).json({ error: "unauthorized" });
+  setAuthCookie(req, res, t);
+  res.json({ ok: true });
+});
+app.post("/api/logout", function(req, res) {
+  var t = req.headers["x-auth"] || cookieToken(req);
+  if (t) { delete sessions[t]; saveSessionsSoon(); }
+  setAuthCookie(req, res, null);
+  res.json({ ok: true });
 });
 
 // ── Web API ────────────────────────────────────────────────────────────────
@@ -1346,6 +2341,172 @@ app.get("/api/slips", auth, function(req, res) {
   }));
 });
 
+// ── Bank statements & payroll ──
+// upload one file (CSV) from the web app: { name, data: base64, month?: "YYYY-MM" for payroll }
+app.post("/api/statements/upload", auth, function(req, res) {
+  try {
+    var b = req.body || {};
+    var buf = Buffer.from(String(b.data || "").replace(/^data:[^,]*,/, ""), "base64");
+    if (!buf.length) return res.status(400).json({ error: "empty file" });
+    if (/\.pdf$/i.test(b.name || "")) return res.json({ ok: false, skipped: true, error: "PDF statements: coming in the next update" });
+    importAny(buf, { name: b.name, source: "upload", month: b.month }).then(function(r) { res.json(r); }).catch(function(e) { res.status(500).json({ error: e.message }); });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get("/api/statements", auth, function(req, res) {
+  var pm = prevMonthOf(bkkNow().y, bkkNow().m);
+  var y = parseInt(req.query.year) || pm.y, m = parseInt(req.query.month) || pm.m;
+  var rc = reconMonth(y, m), st = loadStatements();
+  res.json({ recon: { ym: rc.ym, accounts: rc.accounts, counts: rc.counts, missingStatements: rc.missingStatements },
+    files: Object.values(st.files).sort(function(a, b) { return (b.importedAt || "").localeCompare(a.importedAt || ""); }).slice(0, 40) });
+});
+// money-out line without a slip: record it (creates a transaction), point it to a slip, or set it aside with a note
+app.post("/api/statements/line/:id", auth, function(req, res) {
+  var st = loadStatements();
+  var l = st.lines.find(function(x) { return x.id === req.params.id; });
+  if (!l) return res.status(404).json({ error: "line not found" });
+  var a = req.body.action;
+  if (a === "record") {
+    var reg = loadAccounts(), acct = lineAccount(reg, l), cp = l.counterparty || {};
+    var list = loadPayments();
+    var rec = { id: nextNumericId(), display_id: nextDisplayId(l.date), imageFile: null, billFile: null, savedAt: new Date().toISOString(), source: "statement", stmt_line: l.id,
+      bank_from: acct ? acct.bank : l.bank, account_from: l.account, transaction_date: l.date, transaction_time: l.time, amount: l.out,
+      recipient_name: cp.name || l.desc, bank_to: cp.bill ? null : (cp.bank || null), account_to: cp.digits || null, purpose: null, category: null };
+    var vm = vendorCategoryMap()[vendorKey(rec.recipient_name)];
+    if (vm) rec.category = vm;
+    list.push(rec);
+    savePayments(list);
+    l.resolved = { how: "recorded", slipId: rec.id, at: new Date().toISOString() };
+    saveStatements(st);
+    return res.json({ ok: true, record: rec });
+  }
+  if (a === "match") {
+    var p = loadPayments().find(function(x) { return String(x.id) === String(req.body.slipId); });
+    if (!p) return res.status(404).json({ error: "slip not found" });
+    l.slipId = p.id;
+    delete l.resolved;
+    saveStatements(st);
+    return res.json({ ok: true });
+  }
+  if (a === "ignore") {
+    var note = String(req.body.note || "").trim();
+    if (!note) return res.status(400).json({ error: "say why (e.g. refund, moved between own accounts)" });
+    l.resolved = { how: "ignored", note: note, at: new Date().toISOString() };
+    saveStatements(st);
+    return res.json({ ok: true });
+  }
+  if (a === "reset") { delete l.slipId; delete l.resolved; saveStatements(st); return res.json({ ok: true }); }
+  res.status(400).json({ error: "unknown action" });
+});
+app.get("/api/payroll", auth, function(req, res) {
+  var pm = prevMonthOf(bkkNow().y, bkkNow().m);
+  res.json(payrollPlan(parseInt(req.query.year) || pm.y, parseInt(req.query.month) || pm.m));
+});
+app.post("/api/payroll/apply", auth, function(req, res) { res.json(applyPayroll(parseInt(req.body.year), parseInt(req.body.month))); });
+app.post("/api/payroll/branch-map", auth, function(req, res) {
+  var pnl = loadPnl();
+  var key = req.body.kind === "pos" ? "posBranchMap" : "payrollBranchMap"; // pos = sales & petty-cash reports
+  if (!pnl[key]) pnl[key] = {};
+  if (req.body.branch) pnl[key][String(req.body.raw)] = String(req.body.branch); else delete pnl[key][String(req.body.raw)];
+  savePnl(pnl);
+  res.json({ ok: true });
+});
+app.get("/api/drive", auth, function(req, res) {
+  var c = driveCreds(), s = loadSettings();
+  res.json({ configured: !!(c && c.client_email), email: c ? c.client_email : null, folders: driveFolders(s), lastSync: s.driveLastSync || null, lastResults: s.driveLastResults || [] });
+});
+// several folders (e.g. sales / petty cash, and statement/2026/MMYY); remove: true takes one out
+app.post("/api/drive/folder", auth, function(req, res) {
+  var id = driveFolderId(req.body.link);
+  if (!id) return res.status(400).json({ error: "paste the folder link from Google Drive" });
+  var s = loadSettings();
+  var list = driveFolders(s).filter(function(x) { return x !== id; });
+  if (!req.body.remove) list.push(id);
+  s.driveFolders = list; delete s.driveFolderId; saveSettings(s);
+  res.json({ ok: true, folders: list });
+});
+app.get("/api/overview/check", auth, function(req, res) {
+  var pm = prevMonthOf(bkkNow().y, bkkNow().m);
+  var r = pnlReadiness(parseInt(req.query.year) || pm.y, parseInt(req.query.month) || pm.m);
+  r.sentAt = ((loadSchedule().pnl || {})[r.ym] || {}).sentAt || null;
+  res.json(r);
+});
+// petty-cash categories seen so far → which of our categories they count as
+app.get("/api/petty/categories", auth, function(req, res) {
+  var d = loadPetty(), pnl = loadPnl(), tot = {};
+  Object.values(d.branches).forEach(function(B) { Object.values(B.entries).forEach(function(e) { if (e.status === "สำเร็จ" && e.out > 0 && /รายจ่าย/.test(e.type)) tot[e.category] = (tot[e.category] || 0) + e.out; }); });
+  res.json({ categories: Object.keys(tot).sort(function(a, b) { return tot[b] - tot[a]; }).map(function(c) { return { category: c, total: round2(tot[c]), mapped: (pnl.pettyCatMap || {})[c] || null }; }),
+    branches: Object.keys(d.branches).map(function(raw) { var B = d.branches[raw]; return { name: raw, periods: B.periods.map(function(p) { return p.from + " → " + p.to; }) }; }) });
+});
+app.post("/api/drive/sync", auth, async function(req, res) { res.json(await driveSync()); });
+
+// ── P&L dashboard ──
+app.get("/api/pnl", auth, function(req, res) {
+  var pm = prevMonthOf(bkkNow().y, bkkNow().m);
+  var y = parseInt(req.query.year) || pm.y, m = parseInt(req.query.month) || pm.m;
+  var cur = pnlMonth(y, m);
+  var trend = [];
+  var ty = y, tm = m;
+  for (var i = 0; i < 6; i++) {
+    var P = i === 0 ? cur : pnlMonth(ty, tm);
+    trend.unshift({ ym: P.ym, company: P.company, branches: P.branches.map(function(b) { return { branch: b.branch, revenue: b.revenue, cost: b.variable + b.fixed + b.unset, profit: b.profit }; }) });
+    var pv = prevMonthOf(ty, tm); ty = pv.y; tm = pv.m;
+  }
+  var pnl = loadPnl();
+  res.json({ pnl: cur, trend: trend, revenue: (pnl.months[cur.ym] || {}).revenue || {}, salesFile: cur.salesFile });
+});
+app.get("/api/pnl/settings", auth, function(req, res) {
+  var pnl = loadPnl();
+  var types = {};
+  loadCategories().forEach(function(c) { types[c] = costTypeOf(c, pnl); });
+  res.json({ costTypes: types, hqBranches: pnl.hqBranches, branches: loadAccounts().branches });
+});
+app.post("/api/pnl/settings", auth, function(req, res) {
+  var pnl = loadPnl();
+  var b = req.body || {};
+  if (b.costTypes && typeof b.costTypes === "object") {
+    Object.keys(b.costTypes).forEach(function(c) { if (COST_TYPES.indexOf(b.costTypes[c]) !== -1) pnl.costTypes[c] = b.costTypes[c]; });
+  }
+  if (b.pettyCatMap && typeof b.pettyCatMap === "object") {
+    if (!pnl.pettyCatMap) pnl.pettyCatMap = {};
+    var cats0 = loadCategories();
+    Object.keys(b.pettyCatMap).forEach(function(k) { var v = b.pettyCatMap[k]; if (!v) delete pnl.pettyCatMap[k]; else if (cats0.indexOf(v) !== -1 || v === PETTY_CAT) pnl.pettyCatMap[k] = v; });
+  }
+  if (Array.isArray(b.hqBranches)) {
+    var brs = loadAccounts().branches;
+    pnl.hqBranches = b.hqBranches.filter(function(x) { return brs.indexOf(x) !== -1; });
+  }
+  savePnl(pnl);
+  res.json({ ok: true });
+});
+// one month: sales per branch and how HQ costs are shared (frozen for that month)
+app.post("/api/pnl/month", auth, function(req, res) {
+  var y = parseInt(req.body.year), m = parseInt(req.body.month);
+  if (!y || !m) return res.status(400).json({ error: "year/month required" });
+  var ym = ymKey(y, m);
+  var pnl = loadPnl();
+  snapshotAlloc(pnl, ym);
+  var brs = loadAccounts().branches;
+  if (req.body.revenue && typeof req.body.revenue === "object") {
+    var rv = {};
+    Object.keys(req.body.revenue).forEach(function(k) {
+      var v = Number(String(req.body.revenue[k]).replace(/,/g, ""));
+      if (brs.indexOf(k) !== -1 && v > 0) rv[k] = v;
+    });
+    pnl.months[ym].revenue = rv;
+  }
+  var a = req.body.alloc;
+  if (a && ["revenue", "equal", "custom"].indexOf(a.mode) !== -1) {
+    if (a.mode === "custom") {
+      var pct = {}, tot = 0;
+      Object.keys(a.pct || {}).forEach(function(k) { if (brs.indexOf(k) !== -1) { pct[k] = Number(a.pct[k]) || 0; tot += pct[k]; } });
+      if (Math.abs(tot - 100) > 0.5) return res.status(400).json({ error: "custom % must add up to 100 (now " + tot.toFixed(1) + ")" });
+      pnl.months[ym].alloc = { mode: "custom", pct: pct };
+    } else pnl.months[ym].alloc = { mode: a.mode };
+  }
+  savePnl(pnl);
+  res.json({ ok: true, month: pnl.months[ym] });
+});
+
 // ── Accounts / branches / aliases ──
 app.get("/api/accounts", auth, function(req, res) {
   var reg = syncAccounts();
@@ -1374,6 +2535,7 @@ app.post("/api/accounts", auth, function(req, res) {
     return {
       bank: bank, last4: l4,
       alt: clean(a.alt).map(last4).filter(Boolean),
+      full: String(a.full || "").replace(/\D/g, "").length >= 8 ? String(a.full).replace(/\D/g, "") : null,
       branch: branches.indexOf(a.branch) !== -1 ? a.branch : null,
       type: ACCT_TYPES.indexOf(a.type) !== -1 ? a.type : "company",
       label: String(a.label || "").trim(),
@@ -1780,7 +2942,7 @@ app.patch("/api/slips/:id", auth, function(req, res) {
   var list = loadPayments();
   var idx = list.findIndex(function(p) { return String(p.id) === String(req.params.id); });
   if (idx === -1) return res.status(404).json({ error: "not found" });
-  var allowed = ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number","category","evidence_note","date_ok","dup_ok","recipient_ok"];
+  var allowed = ["amount","transaction_date","transaction_time","bank_from","account_from","bank_to","account_to","recipient_name","purpose","reference_number","category","evidence_note","date_ok","dup_ok","recipient_ok","cost_type","cost_month","stmt_ok"];
   var newName = req.body.recipient_name;
   if (newName !== undefined && newName && list[idx].recipient_name && newName !== list[idx].recipient_name && !list[idx].recipient_read) {
     list[idx].recipient_read = list[idx].recipient_name; // what the AI read — used to auto-correct the same misread next time
@@ -1788,6 +2950,10 @@ app.patch("/api/slips/:id", auth, function(req, res) {
   allowed.forEach(function(f) {
     if (req.body[f] !== undefined) list[idx][f] = req.body[f];
   });
+  if (list[idx].cost_type && COST_TYPES.indexOf(list[idx].cost_type) === -1) delete list[idx].cost_type;
+  if (!list[idx].cost_type) delete list[idx].cost_type;
+  if (list[idx].cost_month && !/^\d{4}-\d{2}$/.test(list[idx].cost_month)) delete list[idx].cost_month;
+  if (!list[idx].cost_month) delete list[idx].cost_month;
   if (list[idx].category) {
     var catsP = loadCategories();
     if (catsP.indexOf(list[idx].category) === -1) list[idx].category = null;
@@ -1826,10 +2992,10 @@ app.delete("/api/inbox/:id", auth, function(req, res) {
 // ── Routes ─────────────────────────────────────────────────────────────────
 app.get("/", function(req, res) { res.send("✅ Slip Tracker Bot is running!"); });
 app.get("/app", function(req, res) { res.sendFile(path.join(__dirname, "webapp.html")); });
-app.use("/slips", express.static(SLIPS_DIR));
-app.use("/bills", express.static(BILLS_DIR));
-app.use("/dashboard", express.static(path.join(__dirname, "dashboard")));
-app.get("/api/report", async function(req, res) {
+app.use("/slips", authOrSigned, express.static(SLIPS_DIR));
+app.use("/bills", authOrSigned, express.static(BILLS_DIR));
+app.use("/dashboard", authOrSigned, express.static(path.join(__dirname, "dashboard")));
+app.get("/api/report", authOrSigned, async function(req, res) {
   var now = new Date(); var year = parseInt(req.query.year) || now.getFullYear(); var month = parseInt(req.query.month) || now.getMonth() + 1;
   try { var file = await makeReport(year, month); res.download(file, "Payment_Report_"+year+"_"+String(month).padStart(2,"0")+".xlsx"); }
   catch(err) { res.status(500).send("Error: " + err.message); }
@@ -1848,8 +3014,9 @@ if (require.main === module) {
   app.listen(PORT, function() {
     console.log("✅ Slip Tracker v8 running on port " + PORT);
     setTimeout(function() { scheduleTick(); }, 30 * 1000);
-    setInterval(function() { scheduleTick(); }, 10 * 60 * 1000);
+    setInterval(function() { scheduleTick(); driveAutoSync(); }, 10 * 60 * 1000);
   });
 }
 // exported for offline test scripts only
-module.exports = { app: app, client: client, classify: classify, loadAccounts: loadAccounts, checkMonth: checkMonth, monthTotals: monthTotals, makeReport: makeReport, scheduleTick: scheduleTick, linkSuggestions: linkSuggestions, nameMatchesAlias: nameMatchesAlias, readinessText: readinessText, reportReadyText: reportReadyText, suggestYearFix: suggestYearFix, suspectDates: suspectDates, duplicateOf: duplicateOf, similarToAccount: similarToAccount, correctedName: correctedName };
+module.exports = { app: app, client: client, classify: classify, loadAccounts: loadAccounts, checkMonth: checkMonth, monthTotals: monthTotals, makeReport: makeReport, scheduleTick: scheduleTick, linkSuggestions: linkSuggestions, nameMatchesAlias: nameMatchesAlias, readinessText: readinessText, reportReadyText: reportReadyText, suggestYearFix: suggestYearFix, suspectDates: suspectDates, duplicateOf: duplicateOf, similarToAccount: similarToAccount, correctedName: correctedName, pnlMonth: pnlMonth, loadPnl: loadPnl,
+  importStatement: importStatement, importAny: importAny, pnlReadiness: pnlReadiness, overviewText: overviewText, reconMonth: reconMonth, payrollPlan: payrollPlan, applyPayroll: applyPayroll, driveSync: driveSync, parseCounterparty: parseCounterparty, loadStatements: loadStatements };

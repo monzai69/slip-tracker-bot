@@ -131,6 +131,18 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
 .rdy-verdict.ok{background:#E8F5E9;color:var(--green);}
 .sv-img{width:100%;max-height:360px;object-fit:contain;background:#F7F9FF;border-radius:8px;cursor:zoom-in;}
 .sv-tbl tr{border-bottom:1px solid var(--border);}
+.pl-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;}
+.pl-card{background:#fff;border:1px solid var(--border);border-radius:14px;padding:12px;}
+.pl-card h4{font-size:15px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:baseline;}
+.pl-line{display:flex;justify-content:space-between;font-size:13px;padding:2px 0;}
+.pl-line.sub{color:var(--text2);font-size:12px;padding-left:10px;}
+.pl-line.total{border-top:1px solid var(--border);margin-top:4px;padding-top:6px;font-weight:700;}
+.pl-profit{font-size:20px;font-weight:700;}
+.pos{color:var(--green);} .neg{color:var(--red);}
+.warn{background:#FFF8E1;border:1px solid #FFE082;border-radius:10px;padding:8px 10px;margin-top:8px;font-size:12px;}
+.ct-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:13px;}
+.ct-row select{width:auto;padding:6px 8px;font-size:12px;}
+.type-chip{font-size:10px;padding:1px 6px;border-radius:8px;background:#EEF2FA;color:var(--text2);margin-left:4px;}
 </style>
 </head>
 <body>
@@ -233,6 +245,46 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
     </div>
   </div>
 
+  <!-- P&L DASHBOARD -->
+  <div class="view hidden" id="view-dash">
+    <div class="row"><select id="dashMonth" onchange="loadDash()" style="flex:1"></select></div>
+    <div class="card mt" id="ovBox"><div class="small">Checking documents…</div></div>
+    <div class="small mt" id="dashCaveat"></div>
+    <div id="dashWarn"></div>
+    <div id="dashCards" class="mt"></div>
+    <div class="section-title">📊 Sales vs cost</div>
+    <div class="card"><canvas id="chBar" height="230"></canvas></div>
+    <div class="section-title">📈 Last 6 months</div>
+    <div class="card"><canvas id="chTrend" height="230"></canvas></div>
+    <div class="section-title">🧾 Cost as % of sales</div>
+    <div id="dashCats"></div>
+    <div class="section-title">💰 Sales typed in <span class="small">(only used when a branch has no sales report)</span></div>
+    <div class="card">
+      <div id="revSource" class="small" style="margin-bottom:8px"></div>
+      <div id="revInputs"></div>
+      <button class="btn btn-gray btn-full" onclick="saveRevenue()">💾 Save typed-in sales</button>
+    </div>
+    <div class="section-title">💵 Petty cash categories</div>
+    <div class="card"><div id="pettyCats"><div class="small">No petty-cash report yet.</div></div><div class="small mt">Which of our categories each petty-cash item counts as. Not chosen = "เงินสดย่อย/Petty cash".</div></div>
+    <div class="section-title">🏢 HQ cost sharing this month</div>
+    <div class="card">
+      <div class="small" id="hqNote"></div>
+      <div id="hqBranchBoxes" class="mt"></div>
+      <select id="allocMode" class="mt" onchange="renderAllocPct()">
+        <option value="revenue">By sales share (recommended)</option>
+        <option value="equal">Equal</option>
+        <option value="custom">Custom %</option>
+      </select>
+      <div id="allocPct" class="mt"></div>
+      <button class="btn btn-blue btn-full" onclick="saveAlloc()">💾 Save sharing for this month</button>
+      <div class="small mt">Saved per month — changing a later month never changes this one.</div>
+    </div>
+    <div class="section-title">👥 Payroll split by branch</div>
+    <div class="card" id="payrollBox"><div class="small">Loading…</div></div>
+    <div class="section-title">🏷 Fixed / variable by category</div>
+    <div class="card"><div id="costTypeRows"></div><div class="small mt">"Not classified" counts as fixed until you choose. A single slip can be changed in ✏️ Edit.</div></div>
+  </div>
+
   <!-- REPORT -->
   <div class="view hidden" id="view-report">
     <div class="card">
@@ -244,6 +296,20 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
       <button class="btn btn-blue btn-full" onclick="downloadReport()">⬇️ Download Excel</button>
       <button class="btn btn-gray btn-full" style="margin-top:8px" onclick="loadReadiness()">🔍 Check readiness of this month</button>
       <div id="readyBox" class="mt"></div>
+    </div>
+
+    <div class="section-title">🏦 Bank statements</div>
+    <div class="card">
+      <div id="driveBox" class="small">Loading…</div>
+      <div class="row mt">
+        <input id="driveLink" placeholder="Add a Drive folder link (sales / petty cash, statement …)" style="flex:1">
+        <button class="btn btn-gray btn-sm" onclick="saveDriveFolder()">＋ Add</button>
+      </div>
+      <button class="btn btn-blue btn-full" id="driveSyncBtn" onclick="driveSyncNow()">🔄 Get new files from Drive</button>
+      <button class="btn btn-gray btn-full" style="margin-top:8px" onclick="document.getElementById('stmtFile').click()">📤 Upload statement / payroll / sales / petty-cash file</button>
+      <input type="file" id="stmtFile" accept=".csv,.xlsx,text/csv" multiple onchange="uploadStatements(this.files)">
+      <div id="stmtResults" class="small mt"></div>
+      <div id="stmtSummary" class="mt"></div>
     </div>
 
     <div class="section-title">🏢 Branches</div>
@@ -294,6 +360,7 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
     <div class="tab" data-v="upload" onclick="switchTab('upload')"><span class="ico">📸</span>Upload</div>
     <div class="tab" data-v="stats" onclick="switchTab('stats')"><span class="ico">📈</span>Stats</div>
     <div class="tab" data-v="report" onclick="switchTab('report')"><span class="ico">📊</span>Report</div>
+    <div class="tab" data-v="dash" onclick="switchTab('dash')"><span class="ico">💹</span>P&amp;L</div>
   </div>
 </div>
 
@@ -411,7 +478,7 @@ function login() {
     })
     .catch(function(){ document.getElementById("loginErr").textContent = "Connection error"; });
 }
-function logout() { TOKEN=""; localStorage.removeItem("st_token"); showLogin(); }
+function logout() { fetch("/api/logout",{method:"POST",headers:{"x-auth":TOKEN}}).catch(function(){}); TOKEN=""; localStorage.removeItem("st_token"); showLogin(); }
 function showLogin() { document.getElementById("loginView").classList.remove("hidden"); document.getElementById("appView").classList.add("hidden"); }
 var CATS = [];
 function loadCats(cb) {
@@ -420,6 +487,8 @@ function loadCats(cb) {
 function showApp() {
   document.getElementById("loginView").classList.add("hidden");
   document.getElementById("appView").classList.remove("hidden");
+  // pictures and downloads are login-only now: make sure this browser has the session cookie
+  fetch("/api/session",{headers:{"x-auth":TOKEN}}).then(function(){ document.querySelectorAll("img[src^='/slips/'],img[src^='/bills/']").forEach(function(im){ var s0=im.src; im.src=""; im.src=s0; }); });
   initMonthPickers();
   loadCats();
   loadAccounts(fillBranchSelect);
@@ -436,7 +505,8 @@ function switchTab(v) {
   if (v==="slips") loadSlips();
   if (v==="match") loadMatch();
   if (v==="stats") loadCats(function(){ loadAccounts(function(){ fillBranchSelect(); loadStats(); }); });
-  if (v==="report") loadAccounts(function(){ renderAccounts(); loadReadiness(); });
+  if (v==="report") loadAccounts(function(){ renderAccounts(); loadReadiness(); loadStatementsBox(); });
+  if (v==="dash") loadCats(loadDash);
 }
 
 // ── Inbox ──
@@ -586,6 +656,16 @@ function initMonthPickers() {
   }
   var oAll=document.createElement("option"); oAll.value="all"; oAll.textContent="All months"; mm.appendChild(oAll);
   var oNd=document.createElement("option"); oNd.value="nodate"; oNd.textContent="⚠️ No date"; mm.appendChild(oNd);
+  var dm = document.getElementById("dashMonth");
+  dm.innerHTML = "";
+  for (var di=1; di<15; di++) {
+    var dd = new Date(now.getFullYear(), now.getMonth()-di+1, 1);
+    var dop = document.createElement("option");
+    dop.value = dd.getFullYear()+"-"+(dd.getMonth()+1);
+    dop.textContent = dd.toLocaleDateString("en-US",{month:"long",year:"numeric"});
+    dm.appendChild(dop);
+  }
+  dm.selectedIndex = 1; // last month
   var sm = document.getElementById("statsMonth");
   sm.innerHTML = "";
   for (var si=0; si<14; si++) {
@@ -886,7 +966,10 @@ function openEdit(id) {
   var iv = p.internal===true?"yes":(p.internal===false?"no":"auto");
   var intOpts = [["auto","🤖 Automatic (by account)"],["yes","🔁 Internal transfer — not counted"],["no","💰 Real expense"]].map(function(o){ return '<option value="'+o[0]+'"'+(iv===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join("");
   document.getElementById("editFields").innerHTML = '<div class="field"><label>Category</label><select id="ef_category">'+catOpts+'</select></div>' +
-    '<div class="field"><label>Internal transfer?</label><select id="ef_internal" data-was="'+iv+'">'+intOpts+'</select></div>' + fields.map(function(f) {
+    '<div class="field"><label>Internal transfer?</label><select id="ef_internal" data-was="'+iv+'">'+intOpts+'</select></div>' +
+    '<div class="acct-row" style="margin:0 0 10px"><div class="field" style="margin:0"><label>Cost type (P&L)</label><select id="ef_cost_type">'+
+      [["","🤖 By category"],["fixed","Fixed"],["variable","Variable"],["capex","Investment (capex)"],["unset","Not classified"]].map(function(o){ return '<option value="'+o[0]+'"'+((p.cost_type||"")===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join("")+
+    '</select></div><div class="field" style="margin:0"><label>Cost month (blank = slip date)</label><input id="ef_cost_month" type="month" value="'+esc(p.cost_month||"")+'"></div></div>' + fields.map(function(f) {
     return '<div class="field"><label>'+f[1]+'</label><input id="ef_'+f[0]+'" type="'+f[2]+'" value="'+((p[f[0]]!==null&&p[f[0]]!==undefined)?esc(p[f[0]]):"")+'"></div>';
   }).join("");
   if (p.recipient_read && p.recipient_read !== p.recipient_name) document.getElementById("editFields").insertAdjacentHTML("afterbegin", '<div class="small" style="margin-bottom:8px">✏️ AI first read the recipient as "'+esc(p.recipient_read)+'" — remembered, so the same misread is corrected automatically next time.</div>');
@@ -902,6 +985,8 @@ function saveEdit() {
   });
   var cv = document.getElementById("ef_category").value;
   body.category = cv===""?null:cv;
+  body.cost_type = document.getElementById("ef_cost_type").value || null;
+  body.cost_month = document.getElementById("ef_cost_month").value || null;
   var ie = document.getElementById("ef_internal");
   var id = editId;
   api("PATCH","/api/slips/"+id, body).then(function(){
@@ -1172,6 +1257,7 @@ function renderAccounts() {
         '<select onchange="acctSet('+i+',\'type\',this.value)">'+tyOpts(a.type)+'</select>'+
         '<input placeholder="Nickname e.g. Samui main" value="'+esc(a.label||"")+'" onchange="acctSet('+i+',\'label\',this.value)">'+
         '<input placeholder="Other last-4 seen on slips" value="'+esc((a.alt||[]).join(", "))+'" onchange="acctSet('+i+',\'alt\',this.value)">'+
+        '<input style="grid-column:1/-1" inputmode="numeric" placeholder="Full account number e.g. 168-3-58464-5 (filled by statements)" value="'+esc(a.full||"")+'" onchange="acctSet('+i+',\'full\',this.value)">'+
       '</div>'+
       '<div class="row mt" style="justify-content:flex-end"><button class="btn btn-red btn-sm" onclick="delAccount('+i+')">🗑 Remove</button></div>'+
     '</div>';
@@ -1314,6 +1400,14 @@ function loadReadiness() {
         '<span class="small">uploaded '+esc((x.savedAt||"").slice(0,10))+'</span>'+
         (x.suggested?'<button class="btn btn-green btn-sm" onclick="fixDate('+p.id+',\''+esc(x.suggested)+'\')">✅ Change to '+esc(x.suggested)+'</button>':'')+
         '<button class="btn btn-gray btn-sm" onclick="dateOk('+p.id+')">Date is correct</button>'); })));
+    secs.push(rdySection("🏦 In the bank statement, but no slip", "Money left the account but nothing is recorded. Match it to a slip, record it, or say why it's not an expense.",
+      (r.stmtNoSlip||[]).map(function(l){ return stmtRow(l); })));
+    secs.push(rdySection("🔍 Slip not found in the bank statement", "The statement covers this day but has no such payment — check account, date and amount (or a duplicate).",
+      (it.notInStatement||[]).map(S).filter(Boolean).map(function(p){ return slipRow(p,
+        '<button class="btn btn-blue btn-sm" onclick="rdyEdit('+p.id+')">✏️ Fix</button>'+
+        '<button class="btn btn-gray btn-sm" onclick="markSlip('+p.id+',{stmt_ok:true})">It is correct</button>'+
+        '<button class="btn btn-red btn-sm" onclick="delDup('+p.id+',\''+esc(slipLabel(p))+'\')">🗑 Delete</button>'); })));
+    if ((r.missingStatements||[]).length) secs.push('<div class="rdy-sec"><div class="rdy-title">📄 Statement missing <span class="badge">'+r.missingStatements.length+'</span></div><div class="small">'+r.missingStatements.map(esc).join("<br>")+'<br>→ put this month\'s statement in the Drive folder (or upload it below)</div></div>');
     secs.push(rdySection("📅 No date", "", (it.noDate||[]).map(S).filter(Boolean).map(function(p){ return slipRow(p,
         '<button class="btn btn-blue btn-sm" onclick="rdyEdit('+p.id+')">✏️ Add date</button>'); })));
     if (r.unassigned.length) secs.push('<div class="rdy-sec"><div class="rdy-title">🆕 Account branch not set <span class="badge">'+r.unassigned.length+'</span></div><div class="small">'+r.unassigned.map(esc).join("<br>")+'<br>→ set the branch in 🏦 Accounts below (or fix "From Acct" with ✏️ Edit if it was misread)</div></div>');
@@ -1324,6 +1418,142 @@ function loadReadiness() {
     box.innerHTML = head + secs.join("") + '<div class="small mt">'+foot.join("<br>")+'</div>';
   });
 }
+function stmtRow(l) {
+  var cp = l.counterparty || {};
+  var cands = (l.candidates||[]).map(function(c){
+    return '<button class="btn btn-gray btn-sm" onclick="stmtAct(\''+l.id+'\',{action:\'match\',slipId:'+c.id+'})">🔗 It\'s #'+esc(c.display_id)+' ('+esc(c.date)+' · '+esc(c.recipient||c.from)+')</button>';
+  }).join("");
+  return '<div class="rdy-row"><div class="rdy-thumb rdy-noimg">🏦<br>bank</div><div class="rdy-info">'+
+    '<div><b>'+esc(l.date)+' '+esc(l.time||"")+'</b> <span class="amt">'+fmtB(l.amount)+'</span></div>'+
+    '<div class="small">'+esc(l.account)+'</div>'+
+    '<div class="small">→ <b>'+esc(cp.name||l.desc)+'</b>'+(cp.digits?' · '+esc(cp.bank||"")+' x'+esc(cp.digits):'')+'</div>'+
+    '<div class="row" style="margin-top:6px">'+cands+
+      '<button class="btn btn-orange btn-sm" onclick="stmtAct(\''+l.id+'\',{action:\'record\'})">➕ Record (no slip)</button>'+
+      '<button class="btn btn-gray btn-sm" onclick="stmtIgnore(\''+l.id+'\')">Not an expense…</button></div>'+
+  '</div></div>';
+}
+function stmtAct(id, body) {
+  api("POST","/api/statements/line/"+id, body).then(function(d){
+    if (!d.ok) { toast("❌ "+(d.error||"error")); return; }
+    toast(body.action==="record" ? "➕ Recorded "+(d.record.display_id?"#"+d.record.display_id:"")+" — add purpose, category and bill" : "✅ Done");
+    loadReadiness(); loadSlips();
+  });
+}
+function stmtIgnore(id) {
+  var note = prompt("Why is this not an expense? (e.g. refund, moved between our own accounts, credit card — itemised later)");
+  if (note && note.trim()) stmtAct(id, {action:"ignore", note: note.trim()});
+}
+function loadStatementsBox() {
+  api("GET","/api/drive").then(function(d){
+    var h;
+    if (!d.configured) h = '⚙️ Drive is not connected yet — set GOOGLE_SERVICE_ACCOUNT_JSON on Railway (see the setup guide). You can still upload files below.';
+    else h = 'Share your statements folder (Viewer) with:<br><b style="user-select:all">'+esc(d.email)+'</b>'+
+      (d.folders.length ? '<br>📁 Folders: '+d.folders.map(function(f){ return '<a href="https://drive.google.com/drive/folders/'+esc(f)+'" target="_blank">…'+esc(f.slice(-6))+'</a> <a href="#" onclick="removeDriveFolder(\''+esc(f)+'\');return false" style="color:#C62828">✕</a>'; }).join(" · ")+
+        '<br>Last check: '+(d.lastSync?new Date(d.lastSync).toLocaleString("th-TH"):"never")+' · checks again by itself every 6 hours' : '<br>📁 No folder yet — paste a folder link below');
+    document.getElementById("driveBox").innerHTML = h;
+    document.getElementById("driveSyncBtn").disabled = !(d.configured && d.folders.length);
+  });
+  var y = document.getElementById("repYear").value, m = document.getElementById("repMonth").value;
+  api("GET","/api/statements?year="+y+"&month="+m).then(function(d){
+    var A = d.recon.accounts;
+    document.getElementById("stmtSummary").innerHTML = A.length ? '<table class="stats-table"><tr><th>Account ('+esc(d.recon.ym)+')</th><th>Statement</th><th>Out</th><th>✅</th><th>⚠️</th><th>Sales in</th></tr>'+
+      A.map(function(a){ return '<tr><td>'+esc(a.label)+'</td><td>'+(a.coverage==="full"?"✅ full":a.coverage==="partial"?"◐ part":"❌ none")+'</td><td class="num">'+fmtB(a.moneyOut)+'</td><td class="num">'+(a.matched+a.internal)+'</td><td class="num">'+a.noSlip+'</td><td class="num">'+fmtB(a.sales)+'</td></tr>'; }).join("")+'</table>'
+      : '<div class="small">No statements imported yet.</div>';
+  });
+}
+function removeDriveFolder(id) {
+  if (!confirm("Stop reading this Drive folder?")) return;
+  api("POST","/api/drive/folder",{link:id,remove:true}).then(function(){ loadStatementsBox(); });
+}
+function saveDriveFolder() {
+  api("POST","/api/drive/folder",{link:document.getElementById("driveLink").value}).then(function(d){ if (d.ok) { toast("📁 Folder saved"); document.getElementById("driveLink").value=""; loadStatementsBox(); } else toast("❌ "+(d.error||"error")); });
+}
+function showImportResults(list) {
+  document.getElementById("stmtResults").innerHTML = list.map(function(r){
+    var name = esc(r.file || r.name || "");
+    if (r.ok && r.kind==="sales_xlsx") return "📊 "+name+" — sales "+esc(r.months.join(", "))+": "+r.bills+" bills · "+esc(r.summary);
+    if (r.ok && r.kind==="petty_xlsx") return "💵 "+name+" — petty cash "+esc(r.branch)+" "+esc(r.period.from)+" → "+esc(r.period.to)+", "+r.entries+" items (balance checked)";
+    if (r.ok && r.kind==="payroll_csv") return "👥 "+name+" — payroll "+esc(r.month)+": "+r.people+" people, "+fmtB(r.total)+" (split it in the 💹 P&L tab)";
+    if (r.ok) return "✅ "+name+" — "+esc(r.account)+" "+esc(r.period.from)+" → "+esc(r.period.to)+", "+r.lines+" lines (balance checked)";
+    return (r.skipped?"⏭ ":"❌ ")+name+" — "+esc(r.error||"");
+  }).join("<br>") || "No new or changed files.";
+}
+function driveSyncNow() {
+  var b = document.getElementById("driveSyncBtn"); b.disabled = true; b.textContent = "🔄 Checking Drive…";
+  api("POST","/api/drive/sync").then(function(d){
+    b.disabled = false; b.textContent = "🔄 Get new files from Drive";
+    if (!d.ok) { toast("❌ "+(d.error||"error")); return; }
+    showImportResults(d.results); loadStatementsBox(); loadReadiness();
+  });
+}
+function uploadStatements(files) {
+  var arr = Array.from(files||[]), out = [], i = 0;
+  var y = document.getElementById("repYear").value, m = document.getElementById("repMonth").value;
+  function next() {
+    if (i >= arr.length) { showImportResults(out); loadStatementsBox(); loadReadiness(); document.getElementById("stmtFile").value=""; return; }
+    var f = arr[i++], rd = new FileReader();
+    rd.onload = function(){ api("POST","/api/statements/upload",{name:f.name,data:rd.result,month:y+"-"+String(m).padStart(2,"0")}).then(function(r){ out.push(Object.assign({file:f.name},r)); next(); }).catch(function(){ out.push({file:f.name,error:"upload failed"}); next(); }); };
+    rd.readAsDataURL(f);
+  }
+  next();
+}
+
+// ── Overview (report 2, 5th of the month) ──
+function loadOverviewBox() {
+  var ym = dashYM();
+  api("GET","/api/overview/check?year="+ym.y+"&month="+ym.m).then(function(r){
+    var ok = function(b){ return b ? "✅" : "❌"; };
+    var item = function(good, text){ return '<div class="ready-line">'+ok(good)+' '+text+'</div>'; };
+    var h = '<div class="rdy-title">📋 Overview report — goes to LINE on the 5th once everything below is ✅</div>'+
+      item(r.expenseDone, "Expense report (1st) passed")+
+      item(!r.salesMissing.length && !r.salesPartial, "Sales report"+(r.salesMissing.length?" — missing: "+esc(r.salesMissing.join(", ")):"")+(r.salesPartial?" — not the whole month":""))+
+      item(!r.pettyMissing.length, "Petty cash, every branch"+(r.pettyMissing.length?" — missing: "+esc(r.pettyMissing.join(", ")):""))+
+      item(!r.payrollMissing && !r.payrollNotApplied, "Payroll file"+(r.payrollMissing?" — not imported":r.payrollNotApplied?" — press Apply below":""));
+    h += (r.unmappedBranches||[]).map(function(u){
+      return '<div class="warn">Which branch is "'+esc(u)+'" in the sales / petty-cash report? <select style="width:auto" onchange="mapPos(\''+esc(u).replace(/'/g,"\\'")+'\',this.value)"><option value="">choose…</option>'+BRANCHES.map(function(b){ return '<option>'+esc(b)+'</option>'; }).join("")+'</select></div>';
+    }).join("");
+    if (r.sentAt) h += '<div class="small mt">📨 Sent '+new Date(r.sentAt).toLocaleString("th-TH")+'</div>';
+    document.getElementById("ovBox").innerHTML = h;
+  });
+}
+function mapPos(raw, branch) { api("POST","/api/payroll/branch-map",{kind:"pos",raw:raw,branch:branch}).then(function(){ toast("🏢 Saved"); loadDash(); }); }
+function loadPettyCats() {
+  api("GET","/api/petty/categories").then(function(d){
+    if (!d.categories.length) return;
+    var opts = function(sel){ return '<option value="">เงินสดย่อย/Petty cash</option>'+CATS.map(function(c){ return '<option value="'+esc(c)+'"'+(sel===c?' selected':'')+'>'+esc(c)+'</option>'; }).join(""); };
+    document.getElementById("pettyCats").innerHTML = d.categories.map(function(c){
+      return '<div class="ct-row"><span>'+esc(c.category)+' <span class="small">'+fmtB(c.total)+'</span></span><select onchange="mapPettyCat(\''+esc(c.category).replace(/'/g,"\\'")+'\',this.value)">'+opts(c.mapped)+'</select></div>';
+    }).join("")+'<div class="small mt">Reports in: '+d.branches.map(function(b){ return esc(b.name)+" ("+esc(b.periods.join(", "))+")"; }).join(" · ")+'</div>';
+  });
+}
+function mapPettyCat(cat, v) { var m = {}; m[cat] = v; api("POST","/api/pnl/settings",{pettyCatMap:m}).then(function(){ toast("💵 "+cat+" → "+(v||"Petty cash")); loadDash(); }); }
+
+// ── Payroll split (P&L tab) ──
+function loadPayrollBox() {
+  var ym = dashYM();
+  api("GET","/api/payroll?year="+ym.y+"&month="+ym.m).then(function(P){
+    var el = document.getElementById("payrollBox");
+    if (!P.imported) { el.innerHTML = '<div class="small">No payroll file for this month yet. Put <b>RCG_Payroll_&lt;Month&gt;_&lt;Year&gt;.csv</b> in the Drive folder or upload it in the Report tab.</div>'; return; }
+    var h = '<div class="small">'+esc(P.file)+' · '+P.people+' people · net '+fmtB(P.total)+(P.applied?' · ✅ applied':'')+'</div>';
+    h += '<table class="stats-table mt"><tr><th>Branch</th><th>Net pay</th></tr>'+Object.keys(P.byBranch).map(function(b){ return '<tr><td>'+esc(b)+'</td><td class="num">'+fmtB(P.byBranch[b])+'</td></tr>'; }).join("")+'</table>';
+    if (P.unmapped.length) h += P.unmapped.map(function(u){
+      return '<div class="warn">Which branch is "'+esc(u)+'"? <select onchange="mapPayroll(\''+esc(u).replace(/'/g,"\\'")+'\',this.value)" style="width:auto"><option value="">choose…</option>'+P.branches.map(function(b){ return '<option>'+esc(b)+'</option>'; }).join("")+'</select></div>';
+    }).join("");
+    h += (P.individual||[]).map(function(i){ return '<div class="small mt">👤 #'+esc(i.display_id)+' '+fmtB(i.amount)+' = '+esc(i.person)+' → '+esc(i.branch||"?")+'</div>'; }).join("");
+    if (P.batch) h += '<div class="small mt">📦 Batch #'+esc(P.batch.display_id)+' '+fmtB(P.batch.amount)+' → '+P.batch.alloc.map(function(a){ return esc(a.branch)+' '+fmtB(a.amount); }).join(" · ")+
+      (Math.abs(P.batch.diff)>1?' <span class="neg">(batch differs from payroll by '+fmtB(P.batch.diff)+' — split by share)</span>':'')+'</div>';
+    else h += '<div class="warn">No salary payment found for this month yet (category "เงินเดือน/Salary").</div>';
+    if (P.batch || (P.individual||[]).length) h += '<button class="btn btn-green btn-full" onclick="applyPayroll()">✅ Apply split to these payments</button>';
+    el.innerHTML = h;
+  });
+}
+function mapPayroll(raw, branch) { api("POST","/api/payroll/branch-map",{raw:raw,branch:branch}).then(loadPayrollBox); }
+function applyPayroll() {
+  var ym = dashYM();
+  if (!confirm("Split the salary payments of this month by branch using the payroll file?\n(This replaces any manual split on them.)")) return;
+  api("POST","/api/payroll/apply",{year:ym.y,month:ym.m}).then(function(d){ if (d.ok) { toast("👥 Payroll split applied"); loadDash(); } else toast("❌ "+(d.error||"error")); });
+}
+
 function rdyNoBill(id) {
   api("POST","/api/slips/"+id+"/no-bill",{expected:true}).then(function(){ toast("🚫 Marked: no bill expected"); loadReadiness(); loadMatch(); });
 }
@@ -1371,6 +1601,132 @@ function delDup(id, did) {
 }
 function dateOk(id) {
   api("PATCH","/api/slips/"+id,{date_ok:true}).then(function(){ toast("✅ Kept"); loadReadiness(); });
+}
+
+// ── P&L dashboard ──
+var DASH = null, PNLSET = null, CHARTS = {};
+var CLR = { revenue:"#1565C0", variable:"#E65100", fixed:"#5E35B1", unset:"#9E9E9E", profit:"#2E7D32" };
+function loadChartJs(cb) {
+  if (window.Chart) return cb();
+  var sc = document.createElement("script");
+  sc.src = "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js";
+  sc.onload = cb; sc.onerror = function(){ toast("⚠️ Charts could not load — numbers still shown"); };
+  document.head.appendChild(sc);
+}
+function pct(x){ return x===null||x===undefined ? "–" : (x*100).toFixed(1)+"%"; }
+function dashYM(){ var v = document.getElementById("dashMonth").value.split("-"); return { y:+v[0], m:+v[1] }; }
+function loadDash() {
+  var ym = dashYM();
+  Promise.all([api("GET","/api/pnl?year="+ym.y+"&month="+ym.m), api("GET","/api/pnl/settings")]).then(function(r) {
+    DASH = r[0]; PNLSET = r[1];
+    var P = DASH.pnl;
+    document.getElementById("dashCaveat").textContent = "ℹ️ "+P.caveat;
+    document.getElementById("dashWarn").innerHTML = P.warnings.map(function(w){ return '<div class="warn">⚠️ '+esc(w)+'</div>'; }).join("");
+    var line = function(lbl, v, cls){ return '<div class="pl-line'+(cls?' '+cls:'')+'"><span>'+lbl+'</span><span>'+v+'</span></div>'; };
+    var card = function(b, title, isCo) {
+      var cost = b.variable + b.fixed + b.unset;
+      return '<div class="pl-card"><h4><span>'+esc(title)+'</span><span class="pl-profit '+(b.profit>=0?'pos':'neg')+'">'+fmtB(b.profit)+'</span></h4>'+
+        '<div class="small" style="margin-bottom:6px">operating profit '+pct(b.profitPct)+'</div>'+
+        line("Revenue (recognised)", fmtB(b.revenue))+
+        (b.billed!==null && b.billed!==undefined ? line("Billed sales", fmtB(b.billed), "sub") : '')+
+        (b.received ? line("Received: cash "+fmtB(b.received.cash)+" · transfer "+fmtB(b.received.transfer)+" · card "+fmtB(b.received.card), "", "sub") : '')+
+        line("Variable cost", fmtB(b.variable))+
+        (isCo?'':line("Contribution margin", fmtB(b.cm)+" ("+pct(b.cmPct)+")", "total"))+
+        line("Fixed cost", fmtB(b.fixed))+
+        (b.unset? line("Not classified", fmtB(b.unset)) : '')+
+        (isCo?'':line("of which HQ share ("+b.hqSharePct.toFixed(1)+"%)", fmtB(b.hqShare), "sub"))+
+        line("Total cost", fmtB(cost), "total")+
+        (isCo?'':line("Break-even sales", b.breakeven===null?"–":fmtB(b.breakeven))+line("Margin of safety", pct(b.mos)))+
+        (b.capex? line("Investment (not in profit)", fmtB(b.capex), "sub") : '')+
+      '</div>';
+    };
+    document.getElementById("dashCards").innerHTML = '<div class="pl-grid">'+P.branches.map(function(b){ return card(b, "🏢 "+b.branch); }).join("")+
+      (P.branches.length>1 ? card(P.company, "🏦 Company", true) : '')+'</div>';
+    // cost % of sales table
+    var cats = {};
+    P.branches.forEach(function(b){ b.cats.forEach(function(c){ if(!cats[c.category]) cats[c.category]={type:c.type,total:0}; cats[c.category].total+=c.amount; }); });
+    var catKeys = Object.keys(cats).sort(function(a,b){ return cats[b].total-cats[a].total; });
+    document.getElementById("dashCats").innerHTML = catKeys.length ? '<table class="stats-table"><tr><th>Category</th>'+P.branches.map(function(b){ return '<th>'+esc(b.branch)+'</th>'; }).join("")+'</tr>'+
+      catKeys.map(function(k){
+        return '<tr><td>'+esc(k.split("/")[0])+'<span class="type-chip">'+esc(cats[k].type)+'</span></td>'+P.branches.map(function(b){
+          var c = b.cats.find(function(x){ return x.category===k; });
+          return '<td class="num">'+(c? (c.pctOfRevenue!==null? pct(c.pctOfRevenue) : '') + '<div class="small">'+fmtB(c.amount)+'</div>' : '–')+'</td>';
+        }).join("")+'</tr>';
+      }).join("")+'</table>' : '<div class="empty small">No costs this month</div>';
+    renderRevenueInputs(); renderHq(); renderCostTypes(); loadPayrollBox(); loadOverviewBox(); loadPettyCats();
+    loadChartJs(drawDashCharts);
+  });
+}
+function drawDashCharts() {
+  var P = DASH.pnl;
+  Object.keys(CHARTS).forEach(function(k){ CHARTS[k].destroy(); });
+  var labels = P.branches.map(function(b){ return b.branch; });
+  var ds = function(lbl, key, stack){ return { label: lbl, data: P.branches.map(function(b){ return b[key]; }), backgroundColor: CLR[key], stack: stack }; };
+  CHARTS.bar = new Chart(document.getElementById("chBar"), { type: "bar",
+    data: { labels: labels, datasets: [ds("Sales","revenue","s"), ds("Variable","variable","c"), ds("Fixed","fixed","c"), ds("Not classified","unset","c")] },
+    options: { responsive: true, plugins: { legend: { position: "bottom" } }, scales: { x: { stacked: true }, y: { stacked: true, ticks: { callback: function(v){ return (v/1000).toLocaleString()+"k"; } } } } } });
+  var T = DASH.trend;
+  var tl = T.map(function(t){ return t.ym; });
+  // months without sales entered are left blank (profit would be meaningless)
+  var has = function(t){ return t.company.revenue > 0; };
+  var sets = [
+    { label: "Sales", data: T.map(function(t){ return has(t) ? t.company.revenue : null; }), borderColor: CLR.revenue, backgroundColor: CLR.revenue },
+    { label: "Total cost", data: T.map(function(t){ return has(t) ? t.company.variable+t.company.fixed+t.company.unset : null; }), borderColor: CLR.variable, backgroundColor: CLR.variable },
+    { label: "Profit", data: T.map(function(t){ return has(t) ? t.company.profit : null; }), borderColor: CLR.profit, backgroundColor: CLR.profit }
+  ];
+  CHARTS.trend = new Chart(document.getElementById("chTrend"), { type: "line", data: { labels: tl, datasets: sets },
+    options: { responsive: true, plugins: { legend: { position: "bottom" } }, scales: { y: { ticks: { callback: function(v){ return (v/1000).toLocaleString()+"k"; } } } } } });
+}
+function opBranches() { return PNLSET.branches.filter(function(b){ return PNLSET.hqBranches.indexOf(b)===-1; }); }
+function renderRevenueInputs() {
+  var rev = DASH.revenue || {};
+  var src = DASH.pnl.branches.map(function(b){ return esc(b.branch)+": "+(b.revenueSource==="sales report"?"📊 sales report":b.revenueSource==="typed in"?"✍️ typed in":"—"); }).join(" · ");
+  document.getElementById("revSource").innerHTML = (DASH.salesFile ? "📊 "+esc(DASH.salesFile)+"<br>" : "")+"Revenue used: "+src;
+  document.getElementById("revInputs").innerHTML = opBranches().map(function(b){
+    return '<div class="field"><label>'+esc(b)+'</label><input inputmode="decimal" class="rev-in" data-b="'+esc(b)+'" value="'+(rev[b]!=null?rev[b]:"")+'" placeholder="0"></div>';
+  }).join("") || '<div class="small">Add branches in the Report tab first.</div>';
+}
+function saveRevenue() {
+  var ym = dashYM(), rev = {};
+  document.querySelectorAll(".rev-in").forEach(function(el){ if (el.value.trim()) rev[el.getAttribute("data-b")] = el.value.replace(/,/g,""); });
+  api("POST","/api/pnl/month",{year:ym.y,month:ym.m,revenue:rev}).then(function(d){ if (d.ok) { toast("💰 Sales saved"); loadDash(); } else toast("❌ "+(d.error||"error")); });
+}
+function renderHq() {
+  var al = DASH.pnl.alloc;
+  document.getElementById("hqBranchBoxes").innerHTML = '<div class="small"><b>Shared-cost (HQ) branches</b> — their costs are split to the others:</div>'+
+    PNLSET.branches.map(function(b){ return '<label style="display:inline-flex;gap:6px;align-items:center;margin:4px 10px 0 0;font-size:13px"><input type="checkbox" style="width:auto" '+(PNLSET.hqBranches.indexOf(b)!==-1?'checked':'')+' onchange="toggleHq(\''+esc(b)+'\',this.checked)">'+esc(b)+'</label>'; }).join("");
+  document.getElementById("allocMode").value = al.mode;
+  var hc = DASH.pnl.hqCost;
+  document.getElementById("hqNote").innerHTML = "HQ cost this month: <b>"+fmtB(hc.variable+hc.fixed+hc.unset)+"</b>"+(al.saved?" · 🔒 setting saved for this month":" · not saved yet (uses "+(al.mode==="custom"?"custom":al.mode)+")");
+  renderAllocPct();
+}
+function renderAllocPct() {
+  var mode = document.getElementById("allocMode").value, al = DASH.pnl.alloc;
+  document.getElementById("allocPct").innerHTML = opBranches().map(function(b){
+    var v = (al.pct[b]||0).toFixed(1);
+    return '<div class="field"><label>'+esc(b)+' %</label><input class="alloc-in" data-b="'+esc(b)+'" value="'+v+'" '+(mode==="custom"?'':'disabled')+'></div>';
+  }).join("");
+}
+function saveAlloc() {
+  var ym = dashYM(), mode = document.getElementById("allocMode").value, p = {};
+  document.querySelectorAll(".alloc-in").forEach(function(el){ p[el.getAttribute("data-b")] = parseFloat(el.value)||0; });
+  api("POST","/api/pnl/month",{year:ym.y,month:ym.m,alloc:{mode:mode,pct:p}}).then(function(d){ if (d.ok) { toast("🔒 Saved for this month"); loadDash(); } else toast("❌ "+(d.error||"error")); });
+}
+function toggleHq(b, on) {
+  var hq = PNLSET.hqBranches.filter(function(x){ return x!==b; });
+  if (on) hq.push(b);
+  api("POST","/api/pnl/settings",{hqBranches:hq}).then(function(){ toast("🏢 Saved"); loadDash(); });
+}
+function renderCostTypes() {
+  var opts = [["fixed","Fixed"],["variable","Variable"],["capex","Investment"],["unset","Not classified"]];
+  document.getElementById("costTypeRows").innerHTML = Object.keys(PNLSET.costTypes).map(function(c){
+    return '<div class="ct-row"><span>'+esc(c)+'</span><select onchange="setCostType(\''+esc(c).replace(/'/g,"\\'")+'\',this.value)">'+
+      opts.map(function(o){ return '<option value="'+o[0]+'"'+(PNLSET.costTypes[c]===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join("")+'</select></div>';
+  }).join("");
+}
+function setCostType(c, v) {
+  var ct = {}; ct[c] = v;
+  api("POST","/api/pnl/settings",{costTypes:ct}).then(function(){ toast("🏷 "+c.split("/")[0]+" → "+v); loadDash(); });
 }
 
 // ── Report ──
