@@ -248,6 +248,7 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
   <!-- P&L DASHBOARD -->
   <div class="view hidden" id="view-dash">
     <div class="row"><select id="dashMonth" onchange="loadDash()" style="flex:1"></select></div>
+    <div class="card mt" id="ovBox"><div class="small">Checking documents…</div></div>
     <div class="small mt" id="dashCaveat"></div>
     <div id="dashWarn"></div>
     <div id="dashCards" class="mt"></div>
@@ -257,12 +258,14 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
     <div class="card"><canvas id="chTrend" height="230"></canvas></div>
     <div class="section-title">🧾 Cost as % of sales</div>
     <div id="dashCats"></div>
-    <div class="section-title">💰 Sales this month (ยอดขาย)</div>
+    <div class="section-title">💰 Sales typed in <span class="small">(only used when a branch has no sales report)</span></div>
     <div class="card">
+      <div id="revSource" class="small" style="margin-bottom:8px"></div>
       <div id="revInputs"></div>
-      <button class="btn btn-green btn-full" onclick="saveRevenue()">💾 Save sales</button>
-      <div class="small mt">Or in LINE: /revenue 2026 10 Samui 2010869</div>
+      <button class="btn btn-gray btn-full" onclick="saveRevenue()">💾 Save typed-in sales</button>
     </div>
+    <div class="section-title">💵 Petty cash categories</div>
+    <div class="card"><div id="pettyCats"><div class="small">No petty-cash report yet.</div></div><div class="small mt">Which of our categories each petty-cash item counts as. Not chosen = "เงินสดย่อย/Petty cash".</div></div>
     <div class="section-title">🏢 HQ cost sharing this month</div>
     <div class="card">
       <div class="small" id="hqNote"></div>
@@ -299,12 +302,12 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
     <div class="card">
       <div id="driveBox" class="small">Loading…</div>
       <div class="row mt">
-        <input id="driveLink" placeholder="Paste the Google Drive folder link" style="flex:1">
-        <button class="btn btn-gray btn-sm" onclick="saveDriveFolder()">Save</button>
+        <input id="driveLink" placeholder="Add a Drive folder link (sales / petty cash, statement …)" style="flex:1">
+        <button class="btn btn-gray btn-sm" onclick="saveDriveFolder()">＋ Add</button>
       </div>
       <button class="btn btn-blue btn-full" id="driveSyncBtn" onclick="driveSyncNow()">🔄 Get new files from Drive</button>
-      <button class="btn btn-gray btn-full" style="margin-top:8px" onclick="document.getElementById('stmtFile').click()">📤 Upload statement / payroll CSV</button>
-      <input type="file" id="stmtFile" accept=".csv,text/csv" multiple onchange="uploadStatements(this.files)">
+      <button class="btn btn-gray btn-full" style="margin-top:8px" onclick="document.getElementById('stmtFile').click()">📤 Upload statement / payroll / sales / petty-cash file</button>
+      <input type="file" id="stmtFile" accept=".csv,.xlsx,text/csv" multiple onchange="uploadStatements(this.files)">
       <div id="stmtResults" class="small mt"></div>
       <div id="stmtSummary" class="mt"></div>
     </div>
@@ -1445,9 +1448,10 @@ function loadStatementsBox() {
     var h;
     if (!d.configured) h = '⚙️ Drive is not connected yet — set GOOGLE_SERVICE_ACCOUNT_JSON on Railway (see the setup guide). You can still upload files below.';
     else h = 'Share your statements folder (Viewer) with:<br><b style="user-select:all">'+esc(d.email)+'</b>'+
-      (d.folderId ? '<br>📁 Folder set · last check: '+(d.lastSync?new Date(d.lastSync).toLocaleString("th-TH"):"never")+' · checks again by itself every 6 hours' : '<br>📁 No folder set yet — paste its link below');
+      (d.folders.length ? '<br>📁 Folders: '+d.folders.map(function(f){ return '<a href="https://drive.google.com/drive/folders/'+esc(f)+'" target="_blank">…'+esc(f.slice(-6))+'</a> <a href="#" onclick="removeDriveFolder(\''+esc(f)+'\');return false" style="color:#C62828">✕</a>'; }).join(" · ")+
+        '<br>Last check: '+(d.lastSync?new Date(d.lastSync).toLocaleString("th-TH"):"never")+' · checks again by itself every 6 hours' : '<br>📁 No folder yet — paste a folder link below');
     document.getElementById("driveBox").innerHTML = h;
-    document.getElementById("driveSyncBtn").disabled = !(d.configured && d.folderId);
+    document.getElementById("driveSyncBtn").disabled = !(d.configured && d.folders.length);
   });
   var y = document.getElementById("repYear").value, m = document.getElementById("repMonth").value;
   api("GET","/api/statements?year="+y+"&month="+m).then(function(d){
@@ -1457,12 +1461,18 @@ function loadStatementsBox() {
       : '<div class="small">No statements imported yet.</div>';
   });
 }
+function removeDriveFolder(id) {
+  if (!confirm("Stop reading this Drive folder?")) return;
+  api("POST","/api/drive/folder",{link:id,remove:true}).then(function(){ loadStatementsBox(); });
+}
 function saveDriveFolder() {
   api("POST","/api/drive/folder",{link:document.getElementById("driveLink").value}).then(function(d){ if (d.ok) { toast("📁 Folder saved"); document.getElementById("driveLink").value=""; loadStatementsBox(); } else toast("❌ "+(d.error||"error")); });
 }
 function showImportResults(list) {
   document.getElementById("stmtResults").innerHTML = list.map(function(r){
     var name = esc(r.file || r.name || "");
+    if (r.ok && r.kind==="sales_xlsx") return "📊 "+name+" — sales "+esc(r.months.join(", "))+": "+r.bills+" bills · "+esc(r.summary);
+    if (r.ok && r.kind==="petty_xlsx") return "💵 "+name+" — petty cash "+esc(r.branch)+" "+esc(r.period.from)+" → "+esc(r.period.to)+", "+r.entries+" items (balance checked)";
     if (r.ok && r.kind==="payroll_csv") return "👥 "+name+" — payroll "+esc(r.month)+": "+r.people+" people, "+fmtB(r.total)+" (split it in the 💹 P&L tab)";
     if (r.ok) return "✅ "+name+" — "+esc(r.account)+" "+esc(r.period.from)+" → "+esc(r.period.to)+", "+r.lines+" lines (balance checked)";
     return (r.skipped?"⏭ ":"❌ ")+name+" — "+esc(r.error||"");
@@ -1487,6 +1497,36 @@ function uploadStatements(files) {
   }
   next();
 }
+
+// ── Overview (report 2, 5th of the month) ──
+function loadOverviewBox() {
+  var ym = dashYM();
+  api("GET","/api/overview/check?year="+ym.y+"&month="+ym.m).then(function(r){
+    var ok = function(b){ return b ? "✅" : "❌"; };
+    var item = function(good, text){ return '<div class="ready-line">'+ok(good)+' '+text+'</div>'; };
+    var h = '<div class="rdy-title">📋 Overview report — goes to LINE on the 5th once everything below is ✅</div>'+
+      item(r.expenseDone, "Expense report (1st) passed")+
+      item(!r.salesMissing.length && !r.salesPartial, "Sales report"+(r.salesMissing.length?" — missing: "+esc(r.salesMissing.join(", ")):"")+(r.salesPartial?" — not the whole month":""))+
+      item(!r.pettyMissing.length, "Petty cash, every branch"+(r.pettyMissing.length?" — missing: "+esc(r.pettyMissing.join(", ")):""))+
+      item(!r.payrollMissing && !r.payrollNotApplied, "Payroll file"+(r.payrollMissing?" — not imported":r.payrollNotApplied?" — press Apply below":""));
+    h += (r.unmappedBranches||[]).map(function(u){
+      return '<div class="warn">Which branch is "'+esc(u)+'" in the sales / petty-cash report? <select style="width:auto" onchange="mapPos(\''+esc(u).replace(/'/g,"\\'")+'\',this.value)"><option value="">choose…</option>'+BRANCHES.map(function(b){ return '<option>'+esc(b)+'</option>'; }).join("")+'</select></div>';
+    }).join("");
+    if (r.sentAt) h += '<div class="small mt">📨 Sent '+new Date(r.sentAt).toLocaleString("th-TH")+'</div>';
+    document.getElementById("ovBox").innerHTML = h;
+  });
+}
+function mapPos(raw, branch) { api("POST","/api/payroll/branch-map",{kind:"pos",raw:raw,branch:branch}).then(function(){ toast("🏢 Saved"); loadDash(); }); }
+function loadPettyCats() {
+  api("GET","/api/petty/categories").then(function(d){
+    if (!d.categories.length) return;
+    var opts = function(sel){ return '<option value="">เงินสดย่อย/Petty cash</option>'+CATS.map(function(c){ return '<option value="'+esc(c)+'"'+(sel===c?' selected':'')+'>'+esc(c)+'</option>'; }).join(""); };
+    document.getElementById("pettyCats").innerHTML = d.categories.map(function(c){
+      return '<div class="ct-row"><span>'+esc(c.category)+' <span class="small">'+fmtB(c.total)+'</span></span><select onchange="mapPettyCat(\''+esc(c.category).replace(/'/g,"\\'")+'\',this.value)">'+opts(c.mapped)+'</select></div>';
+    }).join("")+'<div class="small mt">Reports in: '+d.branches.map(function(b){ return esc(b.name)+" ("+esc(b.periods.join(", "))+")"; }).join(" · ")+'</div>';
+  });
+}
+function mapPettyCat(cat, v) { var m = {}; m[cat] = v; api("POST","/api/pnl/settings",{pettyCatMap:m}).then(function(){ toast("💵 "+cat+" → "+(v||"Petty cash")); loadDash(); }); }
 
 // ── Payroll split (P&L tab) ──
 function loadPayrollBox() {
@@ -1587,7 +1627,9 @@ function loadDash() {
       var cost = b.variable + b.fixed + b.unset;
       return '<div class="pl-card"><h4><span>'+esc(title)+'</span><span class="pl-profit '+(b.profit>=0?'pos':'neg')+'">'+fmtB(b.profit)+'</span></h4>'+
         '<div class="small" style="margin-bottom:6px">operating profit '+pct(b.profitPct)+'</div>'+
-        line("Sales", fmtB(b.revenue))+
+        line("Revenue (recognised)", fmtB(b.revenue))+
+        (b.billed!==null && b.billed!==undefined ? line("Billed sales", fmtB(b.billed), "sub") : '')+
+        (b.received ? line("Received: cash "+fmtB(b.received.cash)+" · transfer "+fmtB(b.received.transfer)+" · card "+fmtB(b.received.card), "", "sub") : '')+
         line("Variable cost", fmtB(b.variable))+
         (isCo?'':line("Contribution margin", fmtB(b.cm)+" ("+pct(b.cmPct)+")", "total"))+
         line("Fixed cost", fmtB(b.fixed))+
@@ -1611,7 +1653,7 @@ function loadDash() {
           return '<td class="num">'+(c? (c.pctOfRevenue!==null? pct(c.pctOfRevenue) : '') + '<div class="small">'+fmtB(c.amount)+'</div>' : '–')+'</td>';
         }).join("")+'</tr>';
       }).join("")+'</table>' : '<div class="empty small">No costs this month</div>';
-    renderRevenueInputs(); renderHq(); renderCostTypes(); loadPayrollBox();
+    renderRevenueInputs(); renderHq(); renderCostTypes(); loadPayrollBox(); loadOverviewBox(); loadPettyCats();
     loadChartJs(drawDashCharts);
   });
 }
@@ -1638,6 +1680,8 @@ function drawDashCharts() {
 function opBranches() { return PNLSET.branches.filter(function(b){ return PNLSET.hqBranches.indexOf(b)===-1; }); }
 function renderRevenueInputs() {
   var rev = DASH.revenue || {};
+  var src = DASH.pnl.branches.map(function(b){ return esc(b.branch)+": "+(b.revenueSource==="sales report"?"📊 sales report":b.revenueSource==="typed in"?"✍️ typed in":"—"); }).join(" · ");
+  document.getElementById("revSource").innerHTML = (DASH.salesFile ? "📊 "+esc(DASH.salesFile)+"<br>" : "")+"Revenue used: "+src;
   document.getElementById("revInputs").innerHTML = opBranches().map(function(b){
     return '<div class="field"><label>'+esc(b)+'</label><input inputmode="decimal" class="rev-in" data-b="'+esc(b)+'" value="'+(rev[b]!=null?rev[b]:"")+'" placeholder="0"></div>';
   }).join("") || '<div class="small">Add branches in the Report tab first.</div>';
