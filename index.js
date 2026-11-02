@@ -1273,12 +1273,14 @@ function importPettyWb(wb, info) {
       category: String(v[ix["รายการ"]] || "").trim(), detail: String(v[ix["รายละเอียด"]] || "").trim(),
       in: xnum(v[ix["เข้า"]]), out: xnum(v[ix["ออก"]]), other: xnum(v[ix["รายรับอื่น (เข้าลิ้นชัก)"]]), status: String(v[ix["สถานะ"]] || "") };
     var balance = v[ix["ยอดคงเหลือ"]];
-    if (e.status === "สำเร็จ") {
-      bal = round2(bal + e.in - e.out);
-      if (typeof balance === "number" && Math.abs(bal - balance) > 0.005) return { ok: false, error: "petty cash " + branch + ": balance does not add up at ID " + e.id + " (expected " + bal.toFixed(2) + ", file says " + balance.toFixed(2) + ")" };
-    }
+    // every row moves the balance as recorded: a cancelled item was deducted when entered and its
+    // "กลับรายการ" row adds it back later — only "สำเร็จ" items count as spending (see pettyCosts)
+    bal = round2(bal + e.in - e.out);
+    if (typeof balance === "number" && Math.abs(bal - balance) > 0.005) return { ok: false, error: "petty cash " + branch + ": balance does not add up at ID " + e.id + " (expected " + bal.toFixed(2) + ", file says " + balance.toFixed(2) + ")" };
     entries.push(e);
   }
+  var closing = typeof xv(head["ยอดปิดช่วง"]) === "number" ? xv(head["ยอดปิดช่วง"]) : null;
+  if (closing !== null && Math.abs(bal - closing) > 0.005) return { ok: false, error: "petty cash " + branch + ": closing balance " + closing.toFixed(2) + " ≠ " + bal.toFixed(2) + " from the items" };
   var d = loadPetty();
   var B = d.branches[branch] || (d.branches[branch] = { periods: [], entries: {} });
   entries.forEach(function(e) { B.entries[e.id] = e; }); // exports overlap (60-day window) → the ID keeps one copy
