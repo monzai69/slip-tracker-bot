@@ -308,7 +308,9 @@ textarea{width:100%;padding:10px;border:1px solid var(--border);border-radius:10
       <button class="btn btn-blue btn-full" id="driveSyncBtn" onclick="driveSyncNow()">🔄 Get new files from Drive</button>
       <button class="btn btn-gray btn-full" style="margin-top:8px" onclick="document.getElementById('stmtFile').click()">📤 Upload statement / payroll / sales / petty-cash file</button>
       <input type="file" id="stmtFile" accept=".csv,.xlsx,text/csv" multiple onchange="uploadStatements(this.files)">
+      <button class="btn btn-gray btn-full" style="margin-top:8px" id="driveFullBtn" onclick="driveSyncNow(true)">🔁 Read every Drive file again</button>
       <div id="stmtResults" class="small mt"></div>
+      <div id="importLog"></div>
       <div id="stmtSummary" class="mt"></div>
     </div>
 
@@ -1446,12 +1448,16 @@ function stmtIgnore(id) {
 function loadStatementsBox() {
   api("GET","/api/drive").then(function(d){
     var h;
-    if (!d.configured) h = '⚙️ Drive is not connected yet — set GOOGLE_SERVICE_ACCOUNT_JSON on Railway (see the setup guide). You can still upload files below.';
+    if (!d.configured) h = '⚙️ Drive is not connected: '+esc(d.configError||"")+'<br>See SETUP_GOOGLE_DRIVE.md. You can still upload files below.';
     else h = 'Share your statements folder (Viewer) with:<br><b style="user-select:all">'+esc(d.email)+'</b>'+
       (d.folders.length ? '<br>📁 Folders: '+d.folders.map(function(f){ return '<a href="https://drive.google.com/drive/folders/'+esc(f)+'" target="_blank">…'+esc(f.slice(-6))+'</a> <a href="#" onclick="removeDriveFolder(\''+esc(f)+'\');return false" style="color:#C62828">✕</a>'; }).join(" · ")+
         '<br>Last check: '+(d.lastSync?new Date(d.lastSync).toLocaleString("th-TH"):"never")+' · checks again by itself every 6 hours' : '<br>📁 No folder yet — paste a folder link below');
     document.getElementById("driveBox").innerHTML = h;
     document.getElementById("driveSyncBtn").disabled = !(d.configured && d.folders.length);
+    var when = function(t){ var x = new Date(t); return x.toLocaleDateString("th-TH",{day:"numeric",month:"short"})+" "+x.toLocaleTimeString("th-TH",{hour:"2-digit",minute:"2-digit"}); };
+    document.getElementById("importLog").innerHTML = (d.log||[]).length ?
+      '<div class="rdy-title mt">📂 Files read recently</div><table class="stats-table"><tr><th></th><th>File</th><th>Result</th><th>When</th></tr>'+
+      d.log.slice(0,25).map(function(x){ return '<tr><td>'+(x.ok?"✅":x.skipped?"⏭":"❌")+'</td><td style="word-break:break-all">'+esc(x.file)+'<div class="small">'+(x.source==="drive"?"Drive":"upload")+'</div></td><td>'+esc(x.msg)+'</td><td class="small">'+when(x.at)+'</td></tr>'; }).join("")+'</table>' : '';
   });
   var y = document.getElementById("repYear").value, m = document.getElementById("repMonth").value;
   api("GET","/api/statements?year="+y+"&month="+m).then(function(d){
@@ -1473,14 +1479,15 @@ function showImportResults(list) {
     var name = esc(r.file || r.name || "");
     if (r.ok && r.kind==="sales_xlsx") return "📊 "+name+" — sales "+esc(r.months.join(", "))+": "+r.bills+" bills · "+esc(r.summary);
     if (r.ok && r.kind==="petty_xlsx") return "💵 "+name+" — petty cash "+esc(r.branch)+" "+esc(r.period.from)+" → "+esc(r.period.to)+", "+r.entries+" items (balance checked)";
-    if (r.ok && r.kind==="payroll_csv") return "👥 "+name+" — payroll "+esc(r.month)+": "+r.people+" people, "+fmtB(r.total)+" (split it in the 💹 P&L tab)";
+    if (r.removed) return "🗑 "+name+" — "+esc(r.msg);
+    if (r.ok && r.kind==="payroll_csv") return "👥 "+name+" — payroll "+esc(r.month)+": "+r.people+" people, "+fmtB(r.total)+(r.note?" ⚠️ "+esc(r.note):"")+" (split it in the 💹 P&L tab)";
     if (r.ok) return "✅ "+name+" — "+esc(r.account)+" "+esc(r.period.from)+" → "+esc(r.period.to)+", "+r.lines+" lines (balance checked)";
     return (r.skipped?"⏭ ":"❌ ")+name+" — "+esc(r.error||"");
   }).join("<br>") || "No new or changed files.";
 }
-function driveSyncNow() {
-  var b = document.getElementById("driveSyncBtn"); b.disabled = true; b.textContent = "🔄 Checking Drive…";
-  api("POST","/api/drive/sync").then(function(d){
+function driveSyncNow(full) {
+  var b = document.getElementById("driveSyncBtn"); b.disabled = true; b.textContent = full ? "🔁 Reading every file…" : "🔄 Checking Drive…";
+  api("POST","/api/drive/sync",{full:!!full}).then(function(d){
     b.disabled = false; b.textContent = "🔄 Get new files from Drive";
     if (!d.ok) { toast("❌ "+(d.error||"error")); return; }
     showImportResults(d.results); loadStatementsBox(); loadReadiness();
@@ -1544,8 +1551,14 @@ function loadPayrollBox() {
       (Math.abs(P.batch.diff)>1?' <span class="neg">(batch differs from payroll by '+fmtB(P.batch.diff)+' — split by share)</span>':'')+'</div>';
     else h += '<div class="warn">No salary payment found for this month yet (category "เงินเดือน/Salary").</div>';
     if (P.batch || (P.individual||[]).length) h += '<button class="btn btn-green btn-full" onclick="applyPayroll()">✅ Apply split to these payments</button>';
+    h += '<button class="btn btn-red btn-sm mt" onclick="removePayroll()">🗑 Wrong file — remove this month\'s payroll</button>';
     el.innerHTML = h;
   });
+}
+function removePayroll() {
+  var ym = dashYM();
+  if (!confirm("Remove the payroll file of this month? (Splits already applied stay until you apply a new file.)")) return;
+  api("POST","/api/payroll/remove",{year:ym.y,month:ym.m}).then(function(){ toast("🗑 Removed"); loadDash(); });
 }
 function mapPayroll(raw, branch) { api("POST","/api/payroll/branch-map",{raw:raw,branch:branch}).then(loadPayrollBox); }
 function applyPayroll() {

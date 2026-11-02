@@ -807,6 +807,12 @@ function importStatement(text, info) {
   if (kind === "payroll_csv") return importPayroll(text, info);
   if (!kind) return { ok: false, skipped: true, error: "not a bank statement this app can read (KBank CSV, SCB CSV, payroll CSV)" };
   var P = kind === "kbank_csv" ? parseKBankCsv(text) : parseScbCsv(text);
+  // SCB exports carry no date range: an account with few payments (e.g. payroll only) would look like "part of the month".
+  // When every line is in the month of its folder (1026) or the month chosen for the upload, the file covers that month.
+  var hint = info.folderMonth || info.month;
+  if (kind === "scb_csv" && hint && P.lines.length && P.lines.every(function(l) { return l.date.slice(0, 7) === hint; })) {
+    P.period = { from: hint + "-01", to: hint + "-" + String(new Date(+hint.slice(0, 4), +hint.slice(5), 0).getDate()).padStart(2, "0") };
+  }
   if (!P.full || P.full.length < 8) return { ok: false, error: "account number not found in file" };
   if (!P.lines.length) return { ok: false, error: "no transactions in file" };
   var bc = checkBalances(P.opening, P.lines);
@@ -952,8 +958,10 @@ function payrollMonthFromName(name) {
   return m ? ymKey(+m[2], MONTHS_EN.indexOf(m[1].toLowerCase()) + 1) : null;
 }
 function importPayroll(text, info) {
-  var ym = payrollMonthFromName(info.name) || info.month;
-  if (!ym) return { ok: false, error: "payroll month unknown — name the file like RCG_Payroll_October_2026.csv" };
+  var nameYm = payrollMonthFromName(info.name);
+  var ym = info.folderMonth || nameYm || info.month;
+  if (!ym) return { ok: false, error: "payroll month unknown — put it in the month folder (e.g. 1026) or name it like RCG_Payroll_October_2026.csv" };
+  var note = info.folderMonth && nameYm && nameYm !== info.folderMonth ? "file name says " + nameYm + " but it is in folder " + info.folderMonth.slice(5) + info.folderMonth.slice(2, 4) + " → used " + ym : null;
   var rows = parseCsv(text);
   var h = rows[0].map(function(x) { return String(x).trim().toLowerCase(); });
   var ix = { name: h.indexOf("name"), nick: h.indexOf("nickname"), branch: h.indexOf("branch"), net: h.indexOf("net pay") };
@@ -962,8 +970,8 @@ function importPayroll(text, info) {
     return { name: String(r[ix.name] || "").trim(), nick: ix.nick !== -1 ? String(r[ix.nick] || "").trim() : "", branchRaw: String(r[ix.branch] || "").trim(), net: toNum(r[ix.net]) || 0 };
   }).filter(function(p) { return p.net > 0; });
   if (!fs.existsSync(PAYROLL_DIR)) fs.mkdirSync(PAYROLL_DIR, { recursive: true });
-  fs.writeFileSync(path.join(PAYROLL_DIR, ym + ".json"), JSON.stringify({ ym: ym, file: info.name || "", importedAt: new Date().toISOString(), people: people }, null, 2));
-  return { ok: true, kind: "payroll_csv", month: ym, people: people.length, total: round2(people.reduce(function(s, p) { return s + p.net; }, 0)) };
+  fs.writeFileSync(path.join(PAYROLL_DIR, ym + ".json"), JSON.stringify({ ym: ym, file: info.name || "", driveId: info.driveId || null, importedAt: new Date().toISOString(), people: people }, null, 2));
+  return { ok: true, kind: "payroll_csv", month: ym, note: note, people: people.length, total: round2(people.reduce(function(s, p) { return s + p.net; }, 0)) };
 }
 function payrollBranch(raw, reg, pnl) {
   var map = pnl.payrollBranchMap || {};
@@ -1030,6 +1038,14 @@ function applyPayroll(y, m) {
 
 // ── Google Drive (service account, read-only, only folders shared with it) ──
 function driveCreds() { try { return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || ""); } catch (e) { return null; } }
+function driveConfigError() {
+  var v = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!v) return "GOOGLE_SERVICE_ACCOUNT_JSON is not set on Railway (or Railway has not redeployed since)";
+  var c;
+  try { c = JSON.parse(v); } catch (e) { return "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON (" + e.message.slice(0, 80) + ") — paste the whole key file, plain quotes"; }
+  if (!c.client_email || !c.private_key) return "the JSON has no client_email / private_key — use the service-account key file";
+  return null;
+}
 var DRIVE_API = process.env.DRIVE_API_URL || "https://www.googleapis.com/drive/v3";
 var driveTok = null;
 function b64url(x) { return Buffer.from(x).toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_"); }
@@ -1066,8 +1082,27 @@ async function driveDownload(id) {
   return Buffer.from(r.data);
 }
 function driveFolderId(link) { var m = /folders\/([\w-]{10,})/.exec(link || "") || /^([\w-]{10,})$/.exec(String(link || "").trim()); return m ? m[1] : null; }
+// last 60 files read (Drive or upload) with their outcome — shown on the Report tab
+function importMessage(r) {
+  if (r.ok) {
+    if (r.kind === "sales_xlsx") return "sales " + r.months.join(", ") + " · " + r.bills + " bills";
+    if (r.kind === "petty_xlsx") return "petty cash " + r.branch + " " + r.period.from + " → " + r.period.to + " · " + r.entries + " items";
+    if (r.kind === "payroll_csv") return "payroll " + r.month + " · " + r.people + " people · " + baht(r.total) + (r.note ? " · ⚠️ " + r.note : "");
+    return r.account + " " + r.period.from + " → " + r.period.to + " · " + r.lines + " lines";
+  }
+  return r.error || "not read";
+}
+function logImport(file, source, r) {
+  var s = loadSettings();
+  s.importLog = [{ at: new Date().toISOString(), file: file, source: source, ok: !!r.ok, skipped: !!r.skipped, msg: importMessage(r) }].concat(s.importLog || []).slice(0, 60);
+  saveSettings(s);
+}
+function pdfSkip(name) {
+  return /payroll|เงินเดือน/i.test(name) ? "payroll PDF (per person) — not needed, the payroll CSV is used" : "PDF statements (Krungsri / GSB): coming in the next update";
+}
 var driveSyncing = false;
-async function driveSync() {
+// full = read every file again (after a fix, or to re-check)
+async function driveSync(full) {
   if (driveSyncing) return { ok: false, error: "sync already running" };
   var folders = driveFolders(loadSettings());
   if (!folders.length) return { ok: false, error: "no Drive folder set" };
@@ -1079,22 +1114,32 @@ async function driveSync() {
     var st = loadStatements();
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
-      if (st.drive[f.id] === f.modifiedTime) continue; // unchanged since last sync
+      if (!full && st.drive[f.id] === f.modifiedTime) continue; // unchanged since last sync
       var isCsv = /\.csv$/i.test(f.name) || f.mimeType === "text/csv";
       var isXlsx = /\.xlsx$/i.test(f.name) || f.mimeType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
       var r;
       if ((isCsv || isXlsx) && Number(f.size || 0) < 15e6) {
-        try { r = await importAny(await driveDownload(f.id), { name: f.name, source: "drive", driveId: f.id, month: monthFromPath(f.path) }); }
+        try { r = await importAny(await driveDownload(f.id), { name: f.name, source: "drive", driveId: f.id, folderMonth: monthFromPath(f.path) }); }
         catch (e) { r = { ok: false, error: e.message }; }
-      } else if (/\.pdf$/i.test(f.name) || f.mimeType === "application/pdf") r = { ok: false, skipped: true, error: "PDF statements: coming in the next update" };
-      else r = { ok: false, skipped: true, error: "not a statement file" };
+      } else if (/\.pdf$/i.test(f.name) || f.mimeType === "application/pdf") r = { ok: false, skipped: true, error: pdfSkip(f.name) };
+      else if (f.mimeType === "application/vnd.google-apps.spreadsheet") r = { ok: false, skipped: true, error: "Google Sheets file — keep the original .xlsx / .csv (turn off Drive's 'Convert uploads')" };
+      else r = { ok: false, skipped: true, error: "not a statement / report file" };
       results.push(Object.assign({ file: f.path }, r));
+      logImport(f.path, "drive", r);
       st = loadStatements();
       if (r.ok || r.skipped) { st.drive[f.id] = f.modifiedTime; saveStatements(st); }
     }
+    // a payroll file deleted from Drive (e.g. put in the wrong month) takes its month's payroll with it
+    var alive = {};
+    files.forEach(function(f) { alive[f.id] = true; });
+    if (fs.existsSync(PAYROLL_DIR)) fs.readdirSync(PAYROLL_DIR).forEach(function(fn) {
+      try {
+        var pr = JSON.parse(fs.readFileSync(path.join(PAYROLL_DIR, fn), "utf8"));
+        if (pr.driveId && !alive[pr.driveId]) { fs.unlinkSync(path.join(PAYROLL_DIR, fn)); results.push({ file: pr.file, ok: true, removed: true, msg: "payroll " + pr.ym + " removed (file no longer in Drive)" }); logImport(pr.file, "drive", { ok: false, skipped: true, error: "payroll " + pr.ym + " removed — the file is no longer in Drive" }); }
+      } catch (e) {}
+    });
     var s2 = loadSettings();
     s2.driveLastSync = new Date().toISOString();
-    s2.driveLastResults = results.filter(function(x) { return !x.skipped; }).slice(-30);
     saveSettings(s2);
     return { ok: true, checked: files.length, results: results };
   } catch (e) {
@@ -2348,8 +2393,9 @@ app.post("/api/statements/upload", auth, function(req, res) {
     var b = req.body || {};
     var buf = Buffer.from(String(b.data || "").replace(/^data:[^,]*,/, ""), "base64");
     if (!buf.length) return res.status(400).json({ error: "empty file" });
-    if (/\.pdf$/i.test(b.name || "")) return res.json({ ok: false, skipped: true, error: "PDF statements: coming in the next update" });
-    importAny(buf, { name: b.name, source: "upload", month: b.month }).then(function(r) { res.json(r); }).catch(function(e) { res.status(500).json({ error: e.message }); });
+    if (/\.pdf$/i.test(b.name || "")) { var sk = { ok: false, skipped: true, error: pdfSkip(b.name) }; logImport(b.name, "upload", sk); return res.json(sk); }
+    importAny(buf, { name: b.name, source: "upload", month: b.month }).then(function(r) { logImport(b.name, "upload", r); res.json(r); })
+      .catch(function(e) { logImport(b.name, "upload", { ok: false, error: e.message }); res.status(500).json({ error: e.message }); });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get("/api/statements", auth, function(req, res) {
@@ -2412,7 +2458,7 @@ app.post("/api/payroll/branch-map", auth, function(req, res) {
 });
 app.get("/api/drive", auth, function(req, res) {
   var c = driveCreds(), s = loadSettings();
-  res.json({ configured: !!(c && c.client_email), email: c ? c.client_email : null, folders: driveFolders(s), lastSync: s.driveLastSync || null, lastResults: s.driveLastResults || [] });
+  res.json({ configured: !!(c && c.client_email), email: c ? c.client_email : null, configError: driveConfigError(), folders: driveFolders(s), lastSync: s.driveLastSync || null, log: s.importLog || [] });
 });
 // several folders (e.g. sales / petty cash, and statement/2026/MMYY); remove: true takes one out
 app.post("/api/drive/folder", auth, function(req, res) {
@@ -2437,7 +2483,13 @@ app.get("/api/petty/categories", auth, function(req, res) {
   res.json({ categories: Object.keys(tot).sort(function(a, b) { return tot[b] - tot[a]; }).map(function(c) { return { category: c, total: round2(tot[c]), mapped: (pnl.pettyCatMap || {})[c] || null }; }),
     branches: Object.keys(d.branches).map(function(raw) { var B = d.branches[raw]; return { name: raw, periods: B.periods.map(function(p) { return p.from + " → " + p.to; }) }; }) });
 });
-app.post("/api/drive/sync", auth, async function(req, res) { res.json(await driveSync()); });
+app.post("/api/drive/sync", auth, async function(req, res) { res.json(await driveSync(!!(req.body && req.body.full))); });
+// remove one month's payroll (wrong file)
+app.post("/api/payroll/remove", auth, function(req, res) {
+  var f = path.join(PAYROLL_DIR, ymKey(parseInt(req.body.year), parseInt(req.body.month)) + ".json");
+  if (fs.existsSync(f)) fs.unlinkSync(f);
+  res.json({ ok: true });
+});
 
 // ── P&L dashboard ──
 app.get("/api/pnl", auth, function(req, res) {
