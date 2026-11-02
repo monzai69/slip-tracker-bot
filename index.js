@@ -1326,6 +1326,50 @@ async function importAny(buf, info) {
   return importStatement(decodeText(buf), info);
 }
 
+// ── Rough account balances: last statement closing − slips paid out since (+ our own transfers in) ──
+// Money coming in after the statement (sales, deposits) is not known until the next statement, so this runs low.
+function balanceEstimate(nowMs) {
+  var today = bkkNow(nowMs).date;
+  var reg = loadAccounts(), st = loadStatements(), all = loadPayments();
+  var rows = [], total = 0, counted = 0;
+  reg.accounts.forEach(function(a) {
+    if (a.type !== "company" && a.type !== "petty_cash") return;
+    var files = !a.full ? [] : Object.values(st.files).filter(function(f) {
+      return f.account === a.full && f.bank === a.bank && f.period && f.period.to <= today && typeof f.closing === "number";
+    }).sort(function(x, y) { return x.period.to.localeCompare(y.period.to) || String(x.importedAt).localeCompare(String(y.importedAt)); });
+    var base = files.pop();
+    if (!base) { if (a.branch) rows.push({ label: acctLabelOf(a), base: null }); return; } // no branch + no statement = probably a misread account
+    var paid = 0, paidN = 0, got = 0, gotN = 0;
+    all.forEach(function(p) {
+      if (!p.transaction_date || p.transaction_date <= base.period.to || p.transaction_date > today) return;
+      var amt = Number(p.amount) || 0;
+      if (findAccount(reg, p.bank_from, p.account_from) === a) { paid += amt; paidN++; }
+      else if (findAccount(reg, p.bank_to, p.account_to) === a) { got += amt; gotN++; }
+    });
+    var est = round2(base.closing - paid + got);
+    total += est; counted++;
+    rows.push({ label: acctLabelOf(a), base: base.closing, baseDate: base.period.to, paid: round2(paid), paidN: paidN, got: round2(got), gotN: gotN, estimate: est });
+  });
+  return { date: today, rows: rows, total: round2(total), counted: counted };
+}
+function thShortDate(iso) {
+  var m = ["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","มิ.ย.","ก.ค.","ส.ค.","ก.ย.","ต.ค.","พ.ย.","ธ.ค."];
+  return +iso.slice(8, 10) + " " + m[+iso.slice(5, 7) - 1] + (iso.slice(0, 4) === String(new Date().getFullYear()) ? "" : " " + iso.slice(0, 4));
+}
+function balanceText(nowMs) {
+  var B = balanceEstimate(nowMs);
+  var L = ["💰 เงินในบัญชีโดยประมาณ ณ " + thShortDate(B.date) + " " + B.date.slice(0, 4)];
+  B.rows.forEach(function(r) {
+    if (r.base === null) { L.push("• " + r.label + ": — ยังไม่มี statement"); return; }
+    L.push("• " + r.label + ": " + baht(r.estimate));
+    L.push("   (statement " + thShortDate(r.baseDate) + " " + baht(r.base) + (r.paidN ? " − สลิป " + r.paidN + " รายการ " + baht(r.paid) : "") + (r.gotN ? " + โอนเข้าจากบัญชีเรา " + baht(r.got) : "") + ")");
+  });
+  if (!B.rows.length) L.push("ยังไม่มีบัญชีในระบบ");
+  L.push("🏦 รวม " + B.counted + " บัญชีที่มี statement: " + baht(B.total));
+  L.push("⚠️ นับเฉพาะเงินออกตามสลิป ยังไม่รวมเงินเข้าหลังวันที่ statement (ยอดขาย เงินฝาก) — ยอดจริงน่าจะสูงกว่านี้");
+  return L.join("\n");
+}
+
 // ── Report 2 (5th of the month): overview / P&L, once every document is in ──
 function opBranchesOf(reg, pnl) { return reg.branches.filter(function(b) { return pnl.hqBranches.indexOf(b) === -1; }); }
 function pnlReadiness(y, m) {
@@ -2011,6 +2055,15 @@ async function scheduleTick(nowMs) {
         if (rm === 12) { ry++; rm = 1; } else rm++;
       }
     }
+    // balances: once a month from the 5th (days 5–10 in case the server was down), daytime only
+    var sb = loadSchedule();
+    if (!sb.balance) sb.balance = {};
+    if (t.day >= 5 && t.day <= 10 && slot !== null && !sb.balance[cur]) {
+      await pushText(to, balanceText(nowMs));
+      sb = loadSchedule(); if (!sb.balance) sb.balance = {};
+      sb.balance[cur] = new Date().toISOString();
+      saveSchedule(sb);
+    }
   } catch (e) {
     console.error("Schedule tick error:", e.message);
   } finally {
@@ -2158,6 +2211,7 @@ async function handleEvent(event) {
           "/notify here — send it to this chat",
           "/check — is last month ready?",
           "/report send — release last month now",
+          "/balance — rough balance of every account",
           "/overview — is the 5th-of-month overview ready?",
           "/overview send — release the overview now",
           "/revenue 2026 10 Samui 2010869 — sales (if no sales report)",
@@ -2204,6 +2258,9 @@ async function handleEvent(event) {
         return client.pushMessage(gid, { type: "text", text: "❌ Report error: " + err.message });
       }
     }
+
+    // ── /balance — rough balance of every account now ──
+    if (tl === "/balance") return client.replyMessage(event.replyToken, { type: "text", text: balanceText() });
 
     // ── /overview [send] [YYYY MM] — report 2 (P&L) readiness, or release it now ──
     if (tl.indexOf("/overview") === 0) {
@@ -3073,4 +3130,4 @@ if (require.main === module) {
 }
 // exported for offline test scripts only
 module.exports = { app: app, client: client, classify: classify, loadAccounts: loadAccounts, checkMonth: checkMonth, monthTotals: monthTotals, makeReport: makeReport, scheduleTick: scheduleTick, linkSuggestions: linkSuggestions, nameMatchesAlias: nameMatchesAlias, readinessText: readinessText, reportReadyText: reportReadyText, suggestYearFix: suggestYearFix, suspectDates: suspectDates, duplicateOf: duplicateOf, similarToAccount: similarToAccount, correctedName: correctedName, pnlMonth: pnlMonth, loadPnl: loadPnl,
-  importStatement: importStatement, importAny: importAny, pnlReadiness: pnlReadiness, overviewText: overviewText, reconMonth: reconMonth, payrollPlan: payrollPlan, applyPayroll: applyPayroll, driveSync: driveSync, parseCounterparty: parseCounterparty, loadStatements: loadStatements };
+  importStatement: importStatement, importAny: importAny, balanceEstimate: balanceEstimate, balanceText: balanceText, pnlReadiness: pnlReadiness, overviewText: overviewText, reconMonth: reconMonth, payrollPlan: payrollPlan, applyPayroll: applyPayroll, driveSync: driveSync, parseCounterparty: parseCounterparty, loadStatements: loadStatements };
